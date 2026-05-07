@@ -3,6 +3,36 @@
 TRUST is a retro TUI IDE for Rust projects inspired by classic blue-screen DOS
 development environments.
 
+Status: experimental nostalgia project. It edits files, browses Rust projects,
+and runs Cargo commands.
+
+## Screenshots
+
+Building and running "Hello World" in TRUST.
+
+| Starting a project | Running a console program |
+| --- | --- |
+| ![Hello project in TRUST](doc/1_hello.png) | ![Hello project editor view](doc/2_hello.png) |
+
+TRUST can build TRUST.
+
+| TRUST Editor | Running Tests |
+| --- | --- |
+| ![TRUST project in TRUST](doc/3_trust.png) | ![TRUST menus and panes](doc/4_trust.png) |
+
+## FAQ
+
+**Why?**  
+Because Rust deserves a blue-screen IDE from the olden days and someone had to do this.
+
+**Does it save my files?**  
+Yes. Use `F2` or `Ctrl+S`. TRUST marks dirty buffers with `*` in the editor title. Still, this is more of a fun project so use at your own risk.
+
+**Is this affiliated with any classic DOS IDE vendor?**  
+No. TRUST is an independent nostalgia project inspired by classic DOS development environments.
+
+## Run
+
 ```sh
 cargo run -- /path/to/rust/project
 ```
