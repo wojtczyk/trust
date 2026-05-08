@@ -92,12 +92,30 @@ impl Editor {
         &self.lines
     }
 
+    pub fn line(&self, row: usize) -> Option<&str> {
+        self.lines.get(row).map(String::as_str)
+    }
+
+    pub fn text(&self) -> String {
+        self.lines.join("\n")
+    }
+
     pub fn cursor_row(&self) -> usize {
         self.cursor_row
     }
 
     pub fn cursor_col(&self) -> usize {
         self.cursor_col
+    }
+
+    pub fn char_before_cursor(&self) -> Option<char> {
+        if self.cursor_col == 0 {
+            return None;
+        }
+
+        self.lines
+            .get(self.cursor_row)
+            .and_then(|line| line.chars().nth(self.cursor_col - 1))
     }
 
     pub fn row_offset(&self) -> usize {
@@ -407,6 +425,43 @@ impl Editor {
         }
     }
 
+    pub fn completion_prefix_bounds(&self) -> (usize, usize, String) {
+        let Some(line) = self.lines.get(self.cursor_row) else {
+            return (0, 0, String::new());
+        };
+        let chars = line.chars().collect::<Vec<_>>();
+        let mut start = self.cursor_col.min(chars.len());
+        while start > 0 && is_identifier_char(chars[start - 1]) {
+            start -= 1;
+        }
+
+        let mut end = self.cursor_col.min(chars.len());
+        while end < chars.len() && is_identifier_char(chars[end]) {
+            end += 1;
+        }
+
+        let prefix = chars[start..self.cursor_col.min(chars.len())]
+            .iter()
+            .collect::<String>();
+        (start, end, prefix)
+    }
+
+    pub fn replace_range_in_current_line(
+        &mut self,
+        start_col: usize,
+        end_col: usize,
+        replacement: &str,
+    ) {
+        self.clear_selection();
+        let row = self.cursor_row;
+        let start_byte = char_to_byte(&self.lines[row], start_col);
+        let end_byte = char_to_byte(&self.lines[row], end_col);
+        self.lines[row].replace_range(start_byte..end_byte, replacement);
+        self.cursor_col = start_col + replacement.chars().count();
+        self.dirty = true;
+        self.keep_cursor_visible();
+    }
+
     fn move_cursor(&mut self, movement: Movement, selecting: bool) {
         if selecting {
             if self.selection_anchor.is_none() {
@@ -555,6 +610,10 @@ fn char_to_byte(text: &str, char_idx: usize) -> usize {
         .unwrap_or(text.len())
 }
 
+fn is_identifier_char(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
 #[cfg(test)]
 mod tests {
     use super::Editor;
@@ -601,5 +660,15 @@ mod tests {
 
         assert_eq!(editor.cursor_row(), 30);
         assert_eq!(editor.row_offset(), 0);
+    }
+
+    #[test]
+    fn replaces_completion_range_on_current_line() {
+        let mut editor = Editor::scratch();
+        editor.insert_text("pri");
+        editor.replace_range_in_current_line(0, 3, "println!");
+
+        assert_eq!(editor.lines(), &["println!".to_string()]);
+        assert_eq!(editor.cursor_col(), 8);
     }
 }

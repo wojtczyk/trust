@@ -55,6 +55,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_menu_dropdown(frame, app);
     }
 
+    if app.completion_visible() {
+        draw_completion_popup(frame, app);
+    }
+
     if app.help_open {
         draw_help(frame, centered(root, 72, 17));
     } else if let Some(dialog) = app.dialog {
@@ -118,8 +122,66 @@ fn draw_menu(frame: &mut Frame, area: Rect, app: &mut App) {
         spans.push(Span::styled(rest, style));
     }
 
+    let base = Style::default().fg(DOS_BLACK).bg(DOS_GRAY);
+    let button_style = Style::default()
+        .fg(DOS_WHITE)
+        .bg(DOS_BLUE)
+        .add_modifier(Modifier::BOLD);
+    let debug_style = if app.debug_active() {
+        Style::default()
+            .fg(DOS_BLACK)
+            .bg(DOS_BRIGHT_CYAN)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        button_style
+    };
+    let breakpoint_style = Style::default()
+        .fg(DOS_YELLOW)
+        .bg(DOS_DARK_GRAY)
+        .add_modifier(Modifier::BOLD);
+
+    let button_labels = [
+        ("[ Run ]", button_style),
+        (
+            if app.debug_active() {
+                "[ Continue ]"
+            } else {
+                "[ Debug ]"
+            },
+            debug_style,
+        ),
+        ("[ BP ]", breakpoint_style),
+    ];
+    let buttons_width = button_labels
+        .iter()
+        .map(|(label, _)| label.chars().count())
+        .sum::<usize>();
+    let left_width = Line::from(spans.clone()).width();
+    let padding = (area.width as usize).saturating_sub(left_width + buttons_width);
+    spans.push(Span::styled(" ".repeat(padding), base));
+
+    let mut button_x = area
+        .x
+        .saturating_add((left_width + padding) as u16);
+    for (index, (label, style)) in button_labels.into_iter().enumerate() {
+        let width = label.chars().count() as u16;
+        let rect = Rect {
+            x: button_x,
+            y: area.y,
+            width,
+            height: 1,
+        };
+        match index {
+            0 => app.geometry.menu.run_button = rect,
+            1 => app.geometry.menu.debug_button = rect,
+            _ => app.geometry.menu.breakpoint_button = rect,
+        }
+        spans.push(Span::styled(label, style));
+        button_x = button_x.saturating_add(width);
+    }
+
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().fg(DOS_BLACK).bg(DOS_GRAY)),
+        Paragraph::new(Line::from(spans)).style(base),
         area,
     );
 }
@@ -304,32 +366,48 @@ fn draw_project(frame: &mut Frame, area: Rect, app: &mut App) {
 fn draw_editor(frame: &mut Frame, area: Rect, app: &mut App) {
     let dirty = if app.editor.is_dirty() { " *" } else { "" };
     let title = format!(" {}{} ", app.current_file_label(), dirty);
-    let block = retro_block(&title, app.focus == Focus::Editor, "Edit", Some("F2 Save"));
+    let footer = if app.completion_visible() {
+        "Ctrl+Space Complete"
+    } else {
+        "F2 Save"
+    };
+    let block = retro_block(&title, app.focus == Focus::Editor, "Edit", Some(footer));
     let inner = block.inner(area);
     app.geometry.editor_inner = inner;
     frame.render_widget(block, area);
 
+    let gutter_width = app.editor_gutter_width();
     let line_number_width = app.editor_line_number_width();
-    let text_cols = inner.width.saturating_sub(line_number_width + 1) as usize;
+    let text_cols = inner.width.saturating_sub(gutter_width) as usize;
     let text_rows = inner.height as usize;
     app.editor.set_viewport(text_rows, text_cols);
 
     let mut lines = Vec::with_capacity(text_rows);
     let row_offset = app.editor.row_offset();
     let col_offset = app.editor.col_offset();
+    let current_path = app.editor.path().map(|path| path.to_path_buf());
 
     for screen_row in 0..text_rows {
         let file_row = row_offset + screen_row;
         let mut spans = Vec::new();
         if let Some(line) = app.editor.lines().get(file_row) {
+            let marker = current_path
+                .as_deref()
+                .map(|path| app.has_breakpoint(path, file_row))
+                .unwrap_or(false);
+            let paused = current_path
+                .as_deref()
+                .map(|path| app.paused_line(path, file_row))
+                .unwrap_or(false);
             let number = format!(
-                "{:>width$} ",
+                "{} {:>width$} ",
+                if marker { "●" } else { " " },
                 file_row + 1,
-                width = line_number_width.saturating_sub(1) as usize
+                width = line_number_width as usize
             );
             spans.push(Span::styled(
                 number,
-                Style::default().fg(DOS_YELLOW).bg(DOS_BLUE),
+                editor_gutter_style(marker, paused),
             ));
 
             spans.extend(render_editor_line(
@@ -337,10 +415,11 @@ fn draw_editor(frame: &mut Frame, area: Rect, app: &mut App) {
                 col_offset,
                 text_cols,
                 app.editor.selection_range_for_line(file_row),
+                paused,
             ));
         } else {
             spans.push(Span::styled(
-                "~".repeat(line_number_width as usize),
+                format!("  {}", "~".repeat(line_number_width as usize)),
                 Style::default().fg(DOS_DARK_GRAY).bg(DOS_BLUE),
             ));
         }
@@ -354,7 +433,7 @@ fn draw_editor(frame: &mut Frame, area: Rect, app: &mut App) {
 
     if app.focus == Focus::Editor {
         let cursor_x = inner.x
-            + line_number_width
+            + gutter_width
             + app
                 .editor
                 .cursor_col()
@@ -428,6 +507,88 @@ fn draw_messages(frame: &mut Frame, area: Rect, app: &mut App) {
     );
 }
 
+fn draw_completion_popup(frame: &mut Frame, app: &App) {
+    let Some(popup) = &app.completion_popup else {
+        return;
+    };
+
+    let inner = app.geometry.editor_inner;
+    if inner.width < 12 || inner.height < 3 {
+        return;
+    }
+
+    let max_label = popup
+        .items
+        .iter()
+        .map(|item| {
+            let detail = item.detail.as_deref().unwrap_or_default();
+            item.label.chars().count() + usize::from(!detail.is_empty()) * (detail.chars().count() + 3)
+        })
+        .max()
+        .unwrap_or(12)
+        .min(inner.width.saturating_sub(2) as usize);
+    let width = (max_label + 2).max(16) as u16;
+    let height = (popup.items.len().min(8) + 2) as u16;
+    let cursor_x = inner
+        .x
+        .saturating_add(app.editor_gutter_width())
+        .saturating_add(app.editor.cursor_col().saturating_sub(app.editor.col_offset()) as u16);
+    let cursor_y = inner
+        .y
+        .saturating_add(app.editor.cursor_row().saturating_sub(app.editor.row_offset()) as u16);
+    let max_x = inner.x.saturating_add(inner.width.saturating_sub(width));
+    let max_y = inner.y.saturating_add(inner.height.saturating_sub(height));
+    let area = Rect {
+        x: cursor_x.min(max_x),
+        y: cursor_y.saturating_add(1).min(max_y),
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(" Complete ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(DOS_YELLOW).bg(DOS_CYAN))
+        .style(Style::default().fg(DOS_BLACK).bg(DOS_GRAY));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let items = popup
+        .items
+        .iter()
+        .take(inner.height as usize)
+        .enumerate()
+        .map(|(index, item)| {
+            let active = index == popup.selected;
+            let style = if active {
+                Style::default()
+                    .fg(DOS_WHITE)
+                    .bg(DOS_BLUE)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(DOS_BLACK).bg(DOS_GRAY)
+            };
+            let detail = item.detail.as_deref().unwrap_or_default();
+            let detail_text = if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" - {}", truncate(detail, inner.width.saturating_sub(item.label.len() as u16 + 3)))
+            };
+            Line::from(Span::styled(
+                truncate(&format!("{}{}", item.label, detail_text), inner.width),
+                style,
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Paragraph::new(items).style(Style::default().fg(DOS_BLACK).bg(DOS_GRAY)),
+        inner,
+    );
+}
+
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     let base = Style::default()
         .fg(DOS_BLACK)
@@ -447,7 +608,13 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         ""
     };
-    let suffix = format!("  {position}{selection}  {} ", app.status);
+    let completion = if app.completion_visible() {
+        "  Complete"
+    } else {
+        ""
+    };
+    let debug = if app.debug_active() { "  Debug" } else { "" };
+    let suffix = format!("  {position}{selection}{completion}{debug}  {} ", app.status);
     let mut line = Line::from(vec![
         Span::styled(" ", base),
         Span::styled("F1", key),
@@ -458,6 +625,8 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(" Open  ", base),
         Span::styled("F5", key),
         Span::styled(" Run  ", base),
+        Span::styled("F6", key),
+        Span::styled(" BP  ", base),
         Span::styled("F7", key),
         Span::styled(" Check  ", base),
         Span::styled("F9", key),
@@ -511,14 +680,19 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::from("F2 Save     F3 Open selected file    F4 Cycle focus"),
         Line::from("File > New creates a file"),
         Line::from("Project > New project runs cargo new"),
-        Line::from("F5 Run      F7 Cargo check           F8 Test"),
-        Line::from("F9 Build    F10 Menu                 Esc Quit"),
+        Line::from("F5 Run      F6 Toggle breakpoint     F7 Cargo check"),
+        Line::from("F8 Test     F9 Build                 F10 Menu"),
+        Line::from("Ctrl+D Debug/Continue  F11 Step Into  F12 Step Over"),
+        Line::from("Shift+F11 Step Out     Shift+F5 Stop debug"),
         Line::from("Ctrl+C Copy Ctrl+X Cut Ctrl+V Paste Ctrl+Q Quit"),
-        Line::from("Ctrl+S Save Ctrl+F Focus            Alt+U Duplicate line"),
+        Line::from("Ctrl+S Save Ctrl+F Focus Ctrl+Space Complete"),
+        Line::from("Alt+U Duplicate line   Alt+X Delete line"),
         Line::from("Shift+Arrows/Home/End/Page selects text"),
         Line::from("Menu: F10 opens, arrows move, Enter activates."),
         Line::from(""),
         Line::from("Mouse: click panes to focus, click source to move cursor,"),
+        Line::from("click gutter or [BP] to toggle breakpoints,"),
+        Line::from("click [Run] or [Debug] in the top bar to execute,"),
         Line::from("click files/directories to open or browse,"),
         Line::from("drag pane borders to resize."),
         Line::from(""),
@@ -778,6 +952,7 @@ fn render_editor_line(
     col_offset: usize,
     text_cols: usize,
     selection: Option<(usize, usize)>,
+    paused: bool,
 ) -> Vec<Span<'static>> {
     let chars = line
         .chars()
@@ -798,7 +973,7 @@ fn render_editor_line(
             run.push(character);
             run_selected = Some(selected);
         } else {
-            push_editor_run(&mut spans, &run, run_selected.unwrap_or(false));
+            push_editor_run(&mut spans, &run, run_selected.unwrap_or(false), paused);
             run.clear();
             run.push(character);
             run_selected = Some(selected);
@@ -806,13 +981,13 @@ fn render_editor_line(
     }
 
     if !run.is_empty() {
-        push_editor_run(&mut spans, &run, run_selected.unwrap_or(false));
+        push_editor_run(&mut spans, &run, run_selected.unwrap_or(false), paused);
     }
 
     spans
 }
 
-fn push_editor_run(spans: &mut Vec<Span<'static>>, run: &str, selected: bool) {
+fn push_editor_run(spans: &mut Vec<Span<'static>>, run: &str, selected: bool, paused: bool) {
     if selected {
         spans.push(Span::styled(
             run.to_string(),
@@ -822,11 +997,11 @@ fn push_editor_run(spans: &mut Vec<Span<'static>>, run: &str, selected: bool) {
                 .add_modifier(Modifier::BOLD),
         ));
     } else {
-        spans.extend(highlight_rust(run));
+        spans.extend(highlight_rust(run, paused));
     }
 }
 
-fn highlight_rust(line: &str) -> Vec<Span<'static>> {
+fn highlight_rust(line: &str, paused: bool) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut current = String::new();
     let mut in_string = false;
@@ -834,52 +1009,67 @@ fn highlight_rust(line: &str) -> Vec<Span<'static>> {
     for character in line.chars() {
         if character == '"' {
             if !current.is_empty() {
-                spans.push(classify_token(&current));
+                spans.push(classify_token(&current, paused));
                 current.clear();
             }
             spans.push(Span::styled(
                 "\"",
-                Style::default().fg(DOS_YELLOW).bg(DOS_BLUE),
+                syntax_style(DOS_YELLOW, paused),
             ));
             in_string = !in_string;
         } else if in_string {
             spans.push(Span::styled(
                 character.to_string(),
-                Style::default().fg(DOS_YELLOW).bg(DOS_BLUE),
+                syntax_style(DOS_YELLOW, paused),
             ));
         } else if character.is_alphanumeric() || character == '_' {
             current.push(character);
         } else {
             if !current.is_empty() {
-                spans.push(classify_token(&current));
+                spans.push(classify_token(&current, paused));
                 current.clear();
             }
             spans.push(Span::styled(
                 character.to_string(),
-                Style::default().fg(DOS_WHITE).bg(DOS_BLUE),
+                syntax_style(DOS_WHITE, paused),
             ));
         }
     }
 
     if !current.is_empty() {
-        spans.push(classify_token(&current));
+        spans.push(classify_token(&current, paused));
     }
 
     spans
 }
 
-fn classify_token(token: &str) -> Span<'static> {
+fn classify_token(token: &str, paused: bool) -> Span<'static> {
     let style = if is_keyword(token) {
-        Style::default()
-            .fg(DOS_YELLOW)
-            .bg(DOS_BLUE)
-            .add_modifier(Modifier::BOLD)
+        syntax_style(DOS_YELLOW, paused).add_modifier(Modifier::BOLD)
     } else if matches!(token, "self" | "Self" | "crate" | "super") {
-        Style::default().fg(DOS_CYAN).bg(DOS_BLUE)
+        syntax_style(DOS_CYAN, paused)
     } else {
-        Style::default().fg(DOS_WHITE).bg(DOS_BLUE)
+        syntax_style(DOS_WHITE, paused)
     };
     Span::styled(token.to_string(), style)
+}
+
+fn syntax_style(fg: Color, paused: bool) -> Style {
+    Style::default()
+        .fg(fg)
+        .bg(if paused { DOS_RED } else { DOS_BLUE })
+}
+
+fn editor_gutter_style(breakpoint: bool, paused: bool) -> Style {
+    let fg = if breakpoint { DOS_BRIGHT_RED } else { DOS_YELLOW };
+    Style::default()
+        .fg(fg)
+        .bg(if paused { DOS_RED } else { DOS_BLUE })
+        .add_modifier(if breakpoint || paused {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        })
 }
 
 fn is_keyword(token: &str) -> bool {
