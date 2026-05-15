@@ -51,6 +51,8 @@ If no path is supplied, TRUST opens the current directory.
 - `F8` / `Ctrl+T`: `cargo test`
 - `F9` / `Ctrl+B`: `cargo build`
 - `F10`: open the menu bar
+- `Ctrl+Z`: undo
+- `Ctrl+Y` / `Ctrl+Shift+Z`: redo
 - `Ctrl+C`: copy selected text
 - `Ctrl+V`: paste clipboard text
 - `Ctrl+X`: cut selected text
@@ -67,6 +69,7 @@ If no path is supplied, TRUST opens the current directory.
 - `Enter` activates the highlighted menu item.
 - `Esc` closes the menu.
 - Mouse clicks on the menu bar and dropdown items work too.
+- `Edit` now includes `Undo` and `Redo`.
 - `File > New` asks for a filename and creates it in the current project pane
   directory.
 - `Project > New project` opens the Cargo project dialog with parent directory,

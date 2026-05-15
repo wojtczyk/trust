@@ -24,6 +24,17 @@ enum Movement {
 }
 
 #[derive(Debug, Clone)]
+struct EditorSnapshot {
+    lines: Vec<String>,
+    cursor_row: usize,
+    cursor_col: usize,
+    row_offset: usize,
+    col_offset: usize,
+    selection_anchor: Option<Position>,
+    revision: usize,
+}
+
+#[derive(Debug, Clone)]
 pub struct Editor {
     path: Option<PathBuf>,
     lines: Vec<String>,
@@ -35,6 +46,10 @@ pub struct Editor {
     viewport_cols: usize,
     selection_anchor: Option<Position>,
     dirty: bool,
+    undo_stack: Vec<EditorSnapshot>,
+    redo_stack: Vec<EditorSnapshot>,
+    revision: usize,
+    clean_revision: usize,
 }
 
 impl Editor {
@@ -50,6 +65,10 @@ impl Editor {
             viewport_cols: 72,
             selection_anchor: None,
             dirty: false,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            revision: 0,
+            clean_revision: 0,
         }
     }
 
@@ -71,6 +90,10 @@ impl Editor {
             viewport_cols: 72,
             selection_anchor: None,
             dirty: false,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            revision: 0,
+            clean_revision: 0,
         })
     }
 
@@ -80,7 +103,8 @@ impl Editor {
         };
 
         fs::write(path, self.lines.join("\n"))?;
-        self.dirty = false;
+        self.clean_revision = self.revision;
+        self.sync_dirty_flag();
         Ok(())
     }
 
@@ -114,6 +138,14 @@ impl Editor {
 
     pub fn has_selection(&self) -> bool {
         self.selection_bounds().is_some()
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
     }
 
     pub fn set_cursor(&mut self, row: usize, col: usize) {
@@ -206,7 +238,9 @@ impl Editor {
 
     pub fn cut_selection(&mut self) -> Option<String> {
         let text = self.selected_text()?;
-        self.delete_selection();
+        self.begin_edit();
+        self.delete_selection_without_history();
+        self.finish_edit();
         Some(text)
     }
 
@@ -275,13 +309,13 @@ impl Editor {
     }
 
     pub fn insert_char(&mut self, character: char) {
-        self.delete_selection();
+        self.begin_edit();
+        self.delete_selection_without_history();
         let cursor_col = self.cursor_col;
         let byte_idx = char_to_byte(&self.lines[self.cursor_row], cursor_col);
         self.lines[self.cursor_row].insert(byte_idx, character);
         self.cursor_col += 1;
-        self.dirty = true;
-        self.keep_cursor_visible();
+        self.finish_edit();
     }
 
     pub fn insert_text(&mut self, text: &str) {
@@ -290,7 +324,8 @@ impl Editor {
             return;
         }
 
-        self.delete_selection();
+        self.begin_edit();
+        self.delete_selection_without_history();
         let parts = text.split('\n').collect::<Vec<_>>();
         if parts.len() == 1 {
             let byte_idx = char_to_byte(&self.lines[self.cursor_row], self.cursor_col);
@@ -314,60 +349,68 @@ impl Editor {
             self.cursor_col = last_part.chars().count();
         }
 
-        self.dirty = true;
-        self.keep_cursor_visible();
+        self.finish_edit();
     }
 
     pub fn insert_newline(&mut self) {
-        self.delete_selection();
+        self.begin_edit();
+        self.delete_selection_without_history();
         let cursor_col = self.cursor_col;
         let byte_idx = char_to_byte(&self.lines[self.cursor_row], cursor_col);
         let remainder = self.lines[self.cursor_row].split_off(byte_idx);
         self.cursor_row += 1;
         self.cursor_col = 0;
         self.lines.insert(self.cursor_row, remainder);
-        self.dirty = true;
-        self.keep_cursor_visible();
+        self.finish_edit();
     }
 
     pub fn backspace(&mut self) {
-        if self.delete_selection() {
+        if self.has_selection() {
+            self.begin_edit();
+            self.delete_selection_without_history();
+            self.finish_edit();
             return;
         }
 
         if self.cursor_col > 0 {
+            self.begin_edit();
             let remove_at = char_to_byte(&self.lines[self.cursor_row], self.cursor_col - 1);
             self.lines[self.cursor_row].remove(remove_at);
             self.cursor_col -= 1;
-            self.dirty = true;
+            self.finish_edit();
         } else if self.cursor_row > 0 {
+            self.begin_edit();
             let current = self.lines.remove(self.cursor_row);
             self.cursor_row -= 1;
             self.cursor_col = self.line_len(self.cursor_row);
             self.lines[self.cursor_row].push_str(&current);
-            self.dirty = true;
+            self.finish_edit();
         }
-        self.keep_cursor_visible();
     }
 
     pub fn delete(&mut self) {
-        if self.delete_selection() {
+        if self.has_selection() {
+            self.begin_edit();
+            self.delete_selection_without_history();
+            self.finish_edit();
             return;
         }
 
         if self.cursor_col < self.line_len(self.cursor_row) {
+            self.begin_edit();
             let remove_at = char_to_byte(&self.lines[self.cursor_row], self.cursor_col);
             self.lines[self.cursor_row].remove(remove_at);
-            self.dirty = true;
+            self.finish_edit();
         } else if self.cursor_row + 1 < self.lines.len() {
+            self.begin_edit();
             let next = self.lines.remove(self.cursor_row + 1);
             self.lines[self.cursor_row].push_str(&next);
-            self.dirty = true;
+            self.finish_edit();
         }
-        self.keep_cursor_visible();
     }
 
     pub fn delete_line(&mut self) {
+        self.begin_edit();
         self.clear_selection();
         if self.lines.len() == 1 {
             self.lines[0].clear();
@@ -377,17 +420,34 @@ impl Editor {
             self.cursor_row = self.cursor_row.min(self.lines.len() - 1);
             self.clamp_col();
         }
-        self.dirty = true;
-        self.keep_cursor_visible();
+        self.finish_edit();
     }
 
     pub fn duplicate_line(&mut self) {
+        self.begin_edit();
         self.clear_selection();
         let line = self.lines[self.cursor_row].clone();
         self.lines.insert(self.cursor_row + 1, line);
         self.cursor_row += 1;
-        self.dirty = true;
-        self.keep_cursor_visible();
+        self.finish_edit();
+    }
+
+    pub fn undo(&mut self) -> bool {
+        let Some(snapshot) = self.undo_stack.pop() else {
+            return false;
+        };
+        self.redo_stack.push(self.snapshot());
+        self.restore_snapshot(snapshot);
+        true
+    }
+
+    pub fn redo(&mut self) -> bool {
+        let Some(snapshot) = self.redo_stack.pop() else {
+            return false;
+        };
+        self.undo_stack.push(self.snapshot());
+        self.restore_snapshot(snapshot);
+        true
     }
 
     pub fn set_viewport(&mut self, rows: usize, cols: usize) {
@@ -475,7 +535,7 @@ impl Editor {
         }
     }
 
-    fn delete_selection(&mut self) -> bool {
+    fn delete_selection_without_history(&mut self) -> bool {
         let Some((start, end)) = self.selection_bounds() else {
             return false;
         };
@@ -495,9 +555,49 @@ impl Editor {
 
         self.set_cursor_position(start);
         self.clear_selection();
-        self.dirty = true;
-        self.keep_cursor_visible();
         true
+    }
+
+    fn snapshot(&self) -> EditorSnapshot {
+        EditorSnapshot {
+            lines: self.lines.clone(),
+            cursor_row: self.cursor_row,
+            cursor_col: self.cursor_col,
+            row_offset: self.row_offset,
+            col_offset: self.col_offset,
+            selection_anchor: self.selection_anchor,
+            revision: self.revision,
+        }
+    }
+
+    fn restore_snapshot(&mut self, snapshot: EditorSnapshot) {
+        self.lines = snapshot.lines;
+        self.cursor_row = snapshot.cursor_row;
+        self.cursor_col = snapshot.cursor_col;
+        self.row_offset = snapshot.row_offset;
+        self.col_offset = snapshot.col_offset;
+        self.selection_anchor = snapshot.selection_anchor;
+        self.revision = snapshot.revision;
+        self.sync_dirty_flag();
+        self.keep_cursor_visible();
+    }
+
+    fn begin_edit(&mut self) {
+        self.undo_stack.push(self.snapshot());
+        self.redo_stack.clear();
+        if self.undo_stack.len() > 512 {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    fn finish_edit(&mut self) {
+        self.revision += 1;
+        self.sync_dirty_flag();
+        self.keep_cursor_visible();
+    }
+
+    fn sync_dirty_flag(&mut self) {
+        self.dirty = self.revision != self.clean_revision;
     }
 
     fn clear_selection(&mut self) {
@@ -557,6 +657,8 @@ fn char_to_byte(text: &str, char_idx: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, time::{SystemTime, UNIX_EPOCH}};
+
     use super::Editor;
 
     #[test]
@@ -601,5 +703,46 @@ mod tests {
 
         assert_eq!(editor.cursor_row(), 30);
         assert_eq!(editor.row_offset(), 0);
+    }
+
+    #[test]
+    fn undo_and_redo_restore_text() {
+        let mut editor = Editor::scratch();
+        editor.insert_text("hello");
+        editor.insert_text(" world");
+
+        assert!(editor.undo());
+        assert_eq!(editor.lines(), &["hello".to_string()]);
+        assert!(editor.redo());
+        assert_eq!(editor.lines(), &["hello world".to_string()]);
+    }
+
+    #[test]
+    fn undo_can_restore_saved_clean_state() {
+        let path = temp_file_path("trust_undo_redo");
+        fs::write(&path, "alpha\n").expect("write temp file");
+
+        let mut editor = Editor::open(&path).expect("open temp file");
+        editor.insert_text("beta");
+        assert!(editor.is_dirty());
+
+        editor.save().expect("save editor");
+        assert!(!editor.is_dirty());
+
+        editor.insert_text("!");
+        assert!(editor.is_dirty());
+        assert!(editor.undo());
+        assert_eq!(editor.lines(), &["betaalpha".to_string(), "".to_string()]);
+        assert!(!editor.is_dirty());
+
+        fs::remove_file(path).expect("remove temp file");
+    }
+
+    fn temp_file_path(prefix: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}_{unique}.txt"))
     }
 }
