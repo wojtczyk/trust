@@ -74,7 +74,7 @@ impl CompletionEngine {
             return None;
         }
 
-        let mut items = if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+        let mut items = if force && path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
             self.client
                 .as_mut()
                 .and_then(|client| {
@@ -151,7 +151,7 @@ fn fallback_items(
                 &mut seen,
                 CompletionCandidate {
                     label: snippet.0.to_string(),
-                    insert_text: snippet.1.to_string(),
+                    insert_text: strip_snippet_placeholders(snippet.1),
                     detail: Some("Snippet".to_string()),
                     kind: CompletionKind::Snippet,
                 },
@@ -629,7 +629,7 @@ fn path_to_uri(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_snippet_placeholders;
+    use super::{CompletionKind, fallback_items, strip_snippet_placeholders};
 
     #[test]
     fn strips_lsp_snippet_placeholders() {
@@ -638,5 +638,16 @@ mod tests {
             "println!(\"value\");"
         );
         assert_eq!(strip_snippet_placeholders("dbg!($0)"), "dbg!()");
+    }
+
+    #[test]
+    fn fallback_snippets_do_not_insert_placeholders() {
+        let items = fallback_items("", "", "if", &[], false);
+        let snippet = items
+            .iter()
+            .find(|item| item.kind == CompletionKind::Snippet && item.label == "if let")
+            .expect("if let snippet");
+
+        assert!(!snippet.insert_text.contains('$'));
     }
 }

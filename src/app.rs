@@ -515,9 +515,9 @@ impl App {
         self.open_file_path(path, "Cargo.toml");
     }
 
-    fn open_file_path(&mut self, path: PathBuf, label: impl Into<String>) {
+    fn open_file_path(&mut self, path: PathBuf, label: impl Into<String>) -> bool {
         if !self.save_dirty_before("Open file") {
-            return;
+            return false;
         }
 
         let label = label.into();
@@ -528,8 +528,12 @@ impl App {
                 self.focus = Focus::Editor;
                 self.status = format!("Opened {label}");
                 self.push_message(format!("Opened {}", path.display()));
+                true
             }
-            Err(error) => self.status = format!("Open failed: {error}"),
+            Err(error) => {
+                self.status = format!("Open failed: {error}");
+                false
+            }
         }
     }
 
@@ -665,7 +669,7 @@ impl App {
 
         let item_count = response.items.len();
         self.completion_popup = Some(CompletionPopup::from_response(response));
-        self.status = if self.completion_engine.is_language_server_available() {
+        self.status = if force && self.completion_engine.is_language_server_available() {
             format!("Autocomplete: {item_count} suggestion(s)")
         } else {
             format!("Autocomplete fallback: {item_count} suggestion(s)")
@@ -830,7 +834,9 @@ impl App {
         let current = self.editor.path().map(Path::to_path_buf);
         if current.as_ref() != Some(&location.path) {
             let label = relative_label(&self.root, &location.path);
-            self.open_file_path(location.path.clone(), label);
+            if !self.open_file_path(location.path.clone(), label) {
+                return;
+            }
         }
         self.editor.set_cursor(location.line, 0);
         self.focus = Focus::Editor;
@@ -1589,7 +1595,7 @@ impl App {
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
                     self.editor.insert_char(character);
                     if character.is_alphanumeric() || matches!(character, '_' | '.') {
-                        self.request_completion(character == '.');
+                        self.request_completion(false);
                     } else {
                         self.close_completion();
                     }
@@ -2020,6 +2026,36 @@ mod tests {
         popup.selected = 2;
         popup.keep_selected_visible(8);
         assert_eq!(popup.scroll, 2);
+    }
+
+    #[test]
+    fn debug_focus_keeps_current_file_when_target_open_fails() {
+        let root = temp_project("debug-open-fails");
+        let first = root.join("src").join("first.rs");
+        let missing = root.join("src").join("missing.rs");
+        fs::write(
+            &first,
+            [
+                "fn main() {",
+                "    println!(\"one\");",
+                "    println!(\"two\");",
+                "}",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let mut app = App::new_for_tests(root.clone());
+        app.open_file_path(first.clone(), "first.rs");
+        app.focus_debug_location(&SourceLocation {
+            path: missing,
+            line: 2,
+        });
+
+        assert_eq!(app.editor.path(), Some(first.as_path()));
+        assert_eq!(app.editor.cursor_row(), 0);
+
+        let _ = fs::remove_dir_all(root);
     }
 
     fn temp_project(name: &str) -> PathBuf {
