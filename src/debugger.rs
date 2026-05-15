@@ -62,7 +62,9 @@ impl DebuggerSession {
             events,
         };
         session.send("settings set stop-disassembly-display never")?;
-        session.send("settings set target.process.thread.step-avoid-regexp '^std::|^core::|^alloc::'")?;
+        session.send(
+            "settings set target.process.thread.step-avoid-regexp '^std::|^core::|^alloc::'",
+        )?;
         for breakpoint in breakpoints {
             session.send(&format!(
                 "breakpoint set --file '{}' --line {}",
@@ -110,16 +112,15 @@ fn spawn_reader(
     std::thread::spawn(move || {
         let mut waiting_for_location = false;
         for line in BufReader::new(stream).lines().map_while(Result::ok) {
-            if line.contains("stop reason =") || line.contains("Process ") && line.contains("stopped")
+            if line.contains("stop reason =")
+                || line.contains("Process ") && line.contains("stopped")
             {
                 waiting_for_location = true;
             }
 
-            if waiting_for_location {
-                if let Some(location) = parse_frame_location(&line, &root) {
-                    let _ = sender.send(DebuggerEvent::Stopped(location));
-                    waiting_for_location = false;
-                }
+            if waiting_for_location && let Some(location) = parse_frame_location(&line, &root) {
+                let _ = sender.send(DebuggerEvent::Stopped(location));
+                waiting_for_location = false;
             }
 
             if let Some(code) = parse_exit_code(&line) {
@@ -156,7 +157,11 @@ fn parse_frame_location(line: &str, root: &Path) -> Option<SourceLocation> {
         .parse::<usize>()
         .ok()?;
     let path = PathBuf::from(path);
-    let path = if path.is_absolute() { path } else { root.join(path) };
+    let path = if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    };
     Some(SourceLocation {
         path,
         line: line_number.saturating_sub(1),
@@ -206,7 +211,12 @@ fn build_debug_binary(root: &Path) -> io::Result<PathBuf> {
         .targets
         .iter()
         .find(|target| target.kind.iter().any(|kind| kind == "bin"))
-        .ok_or_else(|| io::Error::other(format!("project {} has no binary target to debug", package.name)))?;
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "project {} has no binary target to debug",
+                package.name
+            ))
+        })?;
 
     Ok(metadata
         .target_directory
@@ -222,7 +232,9 @@ fn cargo_metadata(root: &Path) -> io::Result<CargoMetadata> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(io::Error::other(format!("cargo metadata failed:\n{stderr}")));
+        return Err(io::Error::other(format!(
+            "cargo metadata failed:\n{stderr}"
+        )));
     }
 
     serde_json::from_slice(&output.stdout)
