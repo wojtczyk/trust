@@ -78,6 +78,7 @@ pub const MENUS: [Menu; 9] = [
         items: &[
             MenuItem::action("New project", "", MenuAction::NewProject),
             MenuItem::action("Open manifest", "", MenuAction::OpenManifest),
+            MenuItem::action("Enable rust-analyzer", "", MenuAction::EnableLanguageServer),
             MenuItem::action("Refresh tree", "R", MenuAction::RefreshProject),
         ],
     },
@@ -156,6 +157,7 @@ pub enum MenuAction {
     CargoTest,
     CargoCheck,
     CargoBuild,
+    EnableLanguageServer,
     DebugStartOrContinue,
     DebugStepInto,
     DebugStepOver,
@@ -895,8 +897,11 @@ impl App {
             if force {
                 self.status = if self.completion_engine.is_language_server_available() {
                     "No completions available here".to_string()
-                } else {
+                } else if self.completion_engine.is_language_server_enabled() {
                     "No completions available (rust-analyzer unavailable, using fallback mode)"
+                        .to_string()
+                } else {
+                    "No completions available (rust-analyzer disabled, using fallback mode)"
                         .to_string()
                 };
             }
@@ -1476,6 +1481,21 @@ impl App {
         }
     }
 
+    fn enable_language_server(&mut self) {
+        self.close_completion();
+        match self.completion_engine.enable_language_server(&self.root) {
+            Ok(()) => {
+                self.status =
+                    "rust-analyzer enabled with build scripts and proc macros disabled".to_string();
+                self.push_message(self.status.clone());
+            }
+            Err(error) => {
+                self.status = format!("Could not start rust-analyzer: {error}");
+                self.push_message(self.status.clone());
+            }
+        }
+    }
+
     fn activate_selected_menu_item(&mut self) -> Action {
         let item = MENUS[self.active_menu].items[self.active_menu_item];
         self.perform_menu_action(item.action)
@@ -1512,6 +1532,7 @@ impl App {
             MenuAction::CargoTest => self.run_cargo("test"),
             MenuAction::CargoCheck => self.run_cargo("check"),
             MenuAction::CargoBuild => self.run_cargo("build"),
+            MenuAction::EnableLanguageServer => self.enable_language_server(),
             MenuAction::DebugStartOrContinue => self.start_or_continue_debug(),
             MenuAction::DebugStepInto => self.debug_step_into(),
             MenuAction::DebugStepOver => self.debug_step_over(),

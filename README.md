@@ -8,8 +8,8 @@ and runs Cargo commands.
 
 ## New IDE Features
 
-- `rust-analyzer` powered autocomplete for Rust files, with a built-in fallback
-  completion list if the language server is unavailable.
+- Optional `rust-analyzer` powered autocomplete for Rust files, with a built-in
+  fallback completion list until the language server is explicitly enabled.
 - Clickable top-bar `Run`, `Debug`, and `BP` controls.
 - Source-level breakpoints in the editor gutter and a basic LLDB-backed debug
   loop with continue and stepping commands.
@@ -38,6 +38,13 @@ Yes. Use `F2` or `Ctrl+S`. TRUST marks dirty buffers with `*` in the editor titl
 
 **Is this affiliated with any classic DOS IDE vendor?**  
 No. TRUST is an independent nostalgia project inspired by classic DOS development environments.
+
+**Can opening a project run code?**
+
+Opening a project is passive. `Project > Enable rust-analyzer` starts the
+language server with build scripts and proc macros disabled. Cargo run, build,
+test, and debug commands still execute project code and should only be used with
+projects you trust.
 
 ## Run
 
@@ -96,6 +103,8 @@ If no path is supplied, TRUST opens the current directory.
   directory.
 - `Project > New project` opens the Cargo project dialog with parent directory,
   project name, and `bin` / `lib` selector.
+- `Project > Enable rust-analyzer` starts language-server completions with build
+  scripts, proc macros, check-on-save, and cache priming disabled.
 - `Window` switches between panes and contains the former focus option.
 
 ## Mouse

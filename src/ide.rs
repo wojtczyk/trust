@@ -39,21 +39,38 @@ pub struct CompletionResponse {
 #[derive(Debug)]
 pub struct CompletionEngine {
     client: Option<LanguageClient>,
+    language_server_enabled: bool,
 }
 
 impl CompletionEngine {
-    pub fn new(root: &Path) -> Self {
-        let client = LanguageClient::new(root).ok();
-        Self { client }
+    pub fn new(_root: &Path) -> Self {
+        Self {
+            client: None,
+            language_server_enabled: false,
+        }
+    }
+
+    pub fn enable_language_server(&mut self, root: &Path) -> io::Result<()> {
+        let client = LanguageClient::new(root)?;
+        self.client = Some(client);
+        self.language_server_enabled = true;
+        Ok(())
     }
 
     #[cfg(test)]
     pub fn disabled_for_tests() -> Self {
-        Self { client: None }
+        Self {
+            client: None,
+            language_server_enabled: false,
+        }
     }
 
     pub fn refresh_root(&mut self, root: &Path) {
-        self.client = LanguageClient::new(root).ok();
+        self.client = if self.language_server_enabled {
+            LanguageClient::new(root).ok()
+        } else {
+            None
+        };
     }
 
     pub fn complete(
@@ -115,6 +132,10 @@ impl CompletionEngine {
 
     pub fn is_language_server_available(&self) -> bool {
         self.client.is_some()
+    }
+
+    pub fn is_language_server_enabled(&self) -> bool {
+        self.language_server_enabled
     }
 }
 
@@ -504,8 +525,18 @@ fn initialize_params(root: &Path) -> Value {
             }
         },
         "initializationOptions": {
+            "cachePriming": {
+                "enable": false
+            },
             "cargo": {
-                "allFeatures": true
+                "allFeatures": true,
+                "buildScripts": {
+                    "enable": false
+                }
+            },
+            "checkOnSave": false,
+            "procMacro": {
+                "enable": false
             }
         }
     })
@@ -629,7 +660,14 @@ fn path_to_uri(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompletionKind, fallback_items, strip_snippet_placeholders};
+    use std::path::Path;
+
+    use serde_json::json;
+
+    use super::{
+        CompletionEngine, CompletionKind, fallback_items, initialize_params,
+        strip_snippet_placeholders,
+    };
 
     #[test]
     fn strips_lsp_snippet_placeholders() {
@@ -649,5 +687,35 @@ mod tests {
             .expect("if let snippet");
 
         assert!(!snippet.insert_text.contains('$'));
+    }
+
+    #[test]
+    fn language_server_starts_disabled() {
+        let engine = CompletionEngine::new(Path::new("."));
+
+        assert!(!engine.is_language_server_enabled());
+        assert!(!engine.is_language_server_available());
+    }
+
+    #[test]
+    fn initialize_params_disable_code_execution_defaults() {
+        let params = initialize_params(Path::new("."));
+
+        assert_eq!(
+            params.pointer("/initializationOptions/cargo/buildScripts/enable"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            params.pointer("/initializationOptions/procMacro/enable"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            params.pointer("/initializationOptions/checkOnSave"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            params.pointer("/initializationOptions/cachePriming/enable"),
+            Some(&json!(false))
+        );
     }
 }
