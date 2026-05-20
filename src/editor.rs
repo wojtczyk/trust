@@ -5,6 +5,8 @@ use std::{
 
 use crate::app::read_to_string;
 
+const INDENT: &str = "    ";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Position {
     pub row: usize,
@@ -116,12 +118,30 @@ impl Editor {
         &self.lines
     }
 
+    pub fn line(&self, row: usize) -> Option<&str> {
+        self.lines.get(row).map(String::as_str)
+    }
+
+    pub fn text(&self) -> String {
+        self.lines.join("\n")
+    }
+
     pub fn cursor_row(&self) -> usize {
         self.cursor_row
     }
 
     pub fn cursor_col(&self) -> usize {
         self.cursor_col
+    }
+
+    pub fn char_before_cursor(&self) -> Option<char> {
+        if self.cursor_col == 0 {
+            return None;
+        }
+
+        self.lines
+            .get(self.cursor_row)
+            .and_then(|line| line.chars().nth(self.cursor_col - 1))
     }
 
     pub fn row_offset(&self) -> usize {
@@ -310,7 +330,10 @@ impl Editor {
 
     pub fn insert_char(&mut self, character: char) {
         self.begin_edit();
-        self.delete_selection_without_history();
+        let replaced_selection = self.delete_selection_without_history();
+        if !replaced_selection && is_closing_delimiter(character) {
+            self.outdent_current_line_once();
+        }
         let cursor_col = self.cursor_col;
         let byte_idx = char_to_byte(&self.lines[self.cursor_row], cursor_col);
         self.lines[self.cursor_row].insert(byte_idx, character);
@@ -357,10 +380,26 @@ impl Editor {
         self.delete_selection_without_history();
         let cursor_col = self.cursor_col;
         let byte_idx = char_to_byte(&self.lines[self.cursor_row], cursor_col);
-        let remainder = self.lines[self.cursor_row].split_off(byte_idx);
+        let current = self.lines[self.cursor_row].clone();
+        let before = current[..byte_idx].to_string();
+        let after = current[byte_idx..].to_string();
+        let base_indent = leading_indent(&before);
+        let line_indent = newline_indent(&before);
+
+        self.lines[self.cursor_row] = before.clone();
         self.cursor_row += 1;
-        self.cursor_col = 0;
-        self.lines.insert(self.cursor_row, remainder);
+        self.cursor_col = line_indent.chars().count();
+
+        if closes_opening_delimiter(&before, &after) {
+            self.lines.insert(self.cursor_row, line_indent);
+            self.lines.insert(
+                self.cursor_row + 1,
+                format!("{base_indent}{}", after.trim_start()),
+            );
+        } else {
+            self.lines
+                .insert(self.cursor_row, format!("{line_indent}{after}"));
+        }
         self.finish_edit();
     }
 
@@ -467,6 +506,65 @@ impl Editor {
         }
     }
 
+    pub fn completion_prefix_bounds(&self) -> (usize, usize, String) {
+        let Some(line) = self.lines.get(self.cursor_row) else {
+            return (0, 0, String::new());
+        };
+        let chars = line.chars().collect::<Vec<_>>();
+        let mut start = self.cursor_col.min(chars.len());
+        while start > 0 && is_identifier_char(chars[start - 1]) {
+            start -= 1;
+        }
+
+        let mut end = self.cursor_col.min(chars.len());
+        while end < chars.len() && is_identifier_char(chars[end]) {
+            end += 1;
+        }
+
+        let prefix = chars[start..self.cursor_col.min(chars.len())]
+            .iter()
+            .collect::<String>();
+        (start, end, prefix)
+    }
+
+    pub fn replace_range_in_current_line(
+        &mut self,
+        start_col: usize,
+        end_col: usize,
+        replacement: &str,
+    ) {
+        self.clear_selection();
+        let row = self.cursor_row;
+        let line_len = self.line_len(row);
+        let start_col = start_col.min(line_len);
+        let end_col = end_col.min(line_len);
+        let (start_col, end_col) = if start_col <= end_col {
+            (start_col, end_col)
+        } else {
+            (end_col, start_col)
+        };
+
+        self.set_cursor_position(Position {
+            row,
+            col: start_col,
+        });
+        if start_col != end_col {
+            self.selection_anchor = Some(Position {
+                row,
+                col: start_col,
+            });
+            self.set_cursor_position(Position { row, col: end_col });
+            self.begin_edit();
+            self.delete_selection_without_history();
+            self.insert_text_without_history(replacement);
+            self.finish_edit();
+            return;
+        }
+        self.begin_edit();
+        self.insert_text_without_history(replacement);
+        self.finish_edit();
+    }
+
     fn move_cursor(&mut self, movement: Movement, selecting: bool) {
         if selecting {
             if self.selection_anchor.is_none() {
@@ -558,6 +656,31 @@ impl Editor {
         true
     }
 
+    fn insert_text_without_history(&mut self, text: &str) {
+        let parts = text.split('\n').collect::<Vec<_>>();
+        if parts.len() == 1 {
+            let byte_idx = char_to_byte(&self.lines[self.cursor_row], self.cursor_col);
+            self.lines[self.cursor_row].insert_str(byte_idx, parts[0]);
+            self.cursor_col += parts[0].chars().count();
+        } else {
+            let byte_idx = char_to_byte(&self.lines[self.cursor_row], self.cursor_col);
+            let suffix = self.lines[self.cursor_row].split_off(byte_idx);
+            self.lines[self.cursor_row].push_str(parts[0]);
+
+            let mut insert_row = self.cursor_row + 1;
+            for part in &parts[1..parts.len() - 1] {
+                self.lines.insert(insert_row, (*part).to_string());
+                insert_row += 1;
+            }
+
+            let last_part = parts.last().copied().unwrap_or_default();
+            self.lines
+                .insert(insert_row, format!("{last_part}{suffix}"));
+            self.cursor_row = insert_row;
+            self.cursor_col = last_part.chars().count();
+        }
+    }
+
     fn snapshot(&self) -> EditorSnapshot {
         EditorSnapshot {
             lines: self.lines.clone(),
@@ -630,6 +753,25 @@ impl Editor {
         self.cursor_col = self.cursor_col.min(self.line_len(self.cursor_row));
     }
 
+    fn outdent_current_line_once(&mut self) {
+        let line = &mut self.lines[self.cursor_row];
+        let before_cursor = slice_chars(line, 0, self.cursor_col);
+        if !before_cursor.chars().all(char::is_whitespace) {
+            return;
+        }
+
+        let remove_cols = outdent_width(&before_cursor);
+        if remove_cols == 0 {
+            return;
+        }
+
+        let start_col = self.cursor_col - remove_cols;
+        let start_byte = char_to_byte(line, start_col);
+        let end_byte = char_to_byte(line, self.cursor_col);
+        line.replace_range(start_byte..end_byte, "");
+        self.cursor_col = start_col;
+    }
+
     fn line_len(&self, row: usize) -> usize {
         self.lines
             .get(row)
@@ -653,6 +795,63 @@ fn char_to_byte(text: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(idx, _)| idx)
         .unwrap_or(text.len())
+}
+
+fn leading_indent(text: &str) -> String {
+    text.chars()
+        .take_while(|character| matches!(character, ' ' | '\t'))
+        .collect()
+}
+
+fn newline_indent(before_cursor: &str) -> String {
+    let mut indent = leading_indent(before_cursor);
+    if increases_indent(before_cursor) {
+        indent.push_str(INDENT);
+    }
+    indent
+}
+
+fn increases_indent(before_cursor: &str) -> bool {
+    let trimmed = before_cursor.trim_end();
+    trimmed.ends_with('{')
+        || trimmed.ends_with('(')
+        || trimmed.ends_with('[')
+        || trimmed.ends_with("=>")
+}
+
+fn closes_opening_delimiter(before_cursor: &str, after_cursor: &str) -> bool {
+    let Some(opening) = before_cursor.trim_end().chars().last() else {
+        return false;
+    };
+    let expected = match opening {
+        '{' => '}',
+        '(' => ')',
+        '[' => ']',
+        _ => return false,
+    };
+
+    after_cursor.trim_start().starts_with(expected)
+}
+
+fn is_closing_delimiter(character: char) -> bool {
+    matches!(character, '}' | ')' | ']')
+}
+
+fn outdent_width(before_cursor: &str) -> usize {
+    if before_cursor.ends_with('\t') {
+        return 1;
+    }
+
+    before_cursor
+        .chars()
+        .rev()
+        .take(INDENT.chars().count())
+        .take_while(|character| *character == ' ')
+        .count()
+}
+
+fn is_identifier_char(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
 }
 
 #[cfg(test)]
@@ -744,5 +943,94 @@ mod tests {
             .expect("system time")
             .as_nanos();
         std::env::temp_dir().join(format!("{prefix}_{unique}.txt"))
+    }
+
+    #[test]
+    fn replaces_completion_range_on_current_line() {
+        let mut editor = Editor::scratch();
+        editor.insert_text("pri");
+        editor.replace_range_in_current_line(0, 3, "println!");
+
+        assert_eq!(editor.lines(), &["println!".to_string()]);
+        assert_eq!(editor.cursor_col(), 8);
+    }
+
+    #[test]
+    fn replaces_completion_range_with_multiline_snippet() {
+        let mut editor = Editor::scratch();
+        editor.insert_text("ma");
+        editor.replace_range_in_current_line(0, 2, "match value {\n    _ => {}\n}");
+
+        assert_eq!(
+            editor.lines(),
+            &[
+                "match value {".to_string(),
+                "    _ => {}".to_string(),
+                "}".to_string(),
+            ]
+        );
+        assert_eq!(editor.cursor_row(), 2);
+        assert_eq!(editor.cursor_col(), 1);
+    }
+
+    #[test]
+    fn newline_carries_current_indent() {
+        let mut editor = Editor::scratch();
+        editor.insert_text("    let value = 1;");
+
+        editor.insert_newline();
+
+        assert_eq!(
+            editor.lines(),
+            &["    let value = 1;".to_string(), "    ".to_string()]
+        );
+        assert_eq!(editor.cursor_row(), 1);
+        assert_eq!(editor.cursor_col(), 4);
+    }
+
+    #[test]
+    fn newline_indents_after_opening_brace() {
+        let mut editor = Editor::scratch();
+        editor.insert_text("fn main() {");
+
+        editor.insert_newline();
+
+        assert_eq!(
+            editor.lines(),
+            &["fn main() {".to_string(), "    ".to_string()]
+        );
+        assert_eq!(editor.cursor_row(), 1);
+        assert_eq!(editor.cursor_col(), 4);
+    }
+
+    #[test]
+    fn newline_between_matching_braces_creates_inner_line() {
+        let mut editor = Editor::scratch();
+        editor.insert_text("    if ready {}");
+        editor.set_cursor(0, 14);
+
+        editor.insert_newline();
+
+        assert_eq!(
+            editor.lines(),
+            &[
+                "    if ready {".to_string(),
+                "        ".to_string(),
+                "    }".to_string(),
+            ]
+        );
+        assert_eq!(editor.cursor_row(), 1);
+        assert_eq!(editor.cursor_col(), 8);
+    }
+
+    #[test]
+    fn closing_brace_dedents_indented_blank_line() {
+        let mut editor = Editor::scratch();
+        editor.insert_text("        ");
+
+        editor.insert_char('}');
+
+        assert_eq!(editor.lines(), &["    }".to_string()]);
+        assert_eq!(editor.cursor_col(), 5);
     }
 }

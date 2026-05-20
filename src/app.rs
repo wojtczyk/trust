@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Component, Path, PathBuf},
     process::Command,
@@ -9,7 +10,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 
 use crate::{
+    debugger::{DebuggerEvent, DebuggerSession, SourceLocation},
     editor::Editor,
+    ide::{CompletionCandidate, CompletionEngine, CompletionResponse},
     project::{ProjectEntry, list_project_dir},
 };
 
@@ -61,11 +64,14 @@ pub const MENUS: [Menu; 9] = [
     },
     Menu {
         title: "Debug",
-        items: &[MenuItem::action(
-            "Breakpoints",
-            "",
-            MenuAction::NotImplemented("Debug"),
-        )],
+        items: &[
+            MenuItem::action("Start/Continue", "Ctrl+D", MenuAction::DebugStartOrContinue),
+            MenuItem::action("Toggle breakpoint", "F6", MenuAction::ToggleBreakpoint),
+            MenuItem::action("Step into", "F11", MenuAction::DebugStepInto),
+            MenuItem::action("Step over", "F12", MenuAction::DebugStepOver),
+            MenuItem::action("Step out", "Shift+F11", MenuAction::DebugStepOut),
+            MenuItem::action("Stop", "Shift+F5", MenuAction::DebugStop),
+        ],
     },
     Menu {
         title: "Project",
@@ -148,6 +154,12 @@ pub enum MenuAction {
     CargoTest,
     CargoCheck,
     CargoBuild,
+    DebugStartOrContinue,
+    DebugStepInto,
+    DebugStepOver,
+    DebugStepOut,
+    DebugStop,
+    ToggleBreakpoint,
     ToggleFocus,
     FocusProject,
     FocusEditor,
@@ -162,6 +174,9 @@ pub enum MenuAction {
 pub struct MenuGeometry {
     pub bar_items: [Rect; MENUS.len()],
     pub dropdown: Option<Rect>,
+    pub run_button: Rect,
+    pub debug_button: Rect,
+    pub breakpoint_button: Rect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,6 +291,44 @@ pub struct Geometry {
     pub status_area: Rect,
 }
 
+#[derive(Debug, Clone)]
+pub struct CompletionPopup {
+    pub items: Vec<CompletionCandidate>,
+    pub selected: usize,
+    pub scroll: usize,
+    pub replace_start: usize,
+    pub replace_end: usize,
+}
+
+impl CompletionPopup {
+    fn from_response(response: CompletionResponse) -> Self {
+        Self {
+            items: response.items,
+            selected: 0,
+            scroll: 0,
+            replace_start: response.replace_start,
+            replace_end: response.replace_end,
+        }
+    }
+
+    fn selected_item(&self) -> Option<&CompletionCandidate> {
+        self.items.get(self.selected)
+    }
+
+    fn keep_selected_visible(&mut self, visible_rows: usize) {
+        let visible_rows = visible_rows.max(1);
+        if self.selected < self.scroll {
+            self.scroll = self.selected;
+        } else if self.selected >= self.scroll + visible_rows {
+            self.scroll = self.selected + 1 - visible_rows;
+        }
+
+        self.scroll = self
+            .scroll
+            .min(self.items.len().saturating_sub(visible_rows));
+    }
+}
+
 pub const MIN_PROJECT_PANE_WIDTH: u16 = 18;
 pub const MIN_EDITOR_PANE_WIDTH: u16 = 24;
 pub const MIN_MESSAGES_PANE_HEIGHT: u16 = 4;
@@ -303,15 +356,24 @@ pub struct App {
     pub project_pane_width: u16,
     pub messages_pane_height: u16,
     pub geometry: Geometry,
+    pub completion_popup: Option<CompletionPopup>,
+    pub breakpoints: BTreeMap<PathBuf, BTreeSet<usize>>,
+    pub debug_location: Option<SourceLocation>,
+    completion_engine: CompletionEngine,
+    debugger: Option<DebuggerSession>,
     drag_target: Option<DragTarget>,
 }
 
 impl App {
     pub fn new(root: PathBuf) -> Self {
+        Self::with_completion_engine(root.clone(), CompletionEngine::new(&root))
+    }
+
+    fn with_completion_engine(root: PathBuf, completion_engine: CompletionEngine) -> Self {
         let mut app = Self {
             browser_dir: root.clone(),
             new_project: NewProjectForm::new(&root),
-            root,
+            root: root.clone(),
             project_files: Vec::new(),
             selected_file: 0,
             editor: Editor::scratch(),
@@ -329,10 +391,49 @@ impl App {
             project_pane_width: 30,
             messages_pane_height: 6,
             geometry: Geometry::default(),
+            completion_popup: None,
+            breakpoints: BTreeMap::new(),
+            debug_location: None,
+            completion_engine,
+            debugger: None,
             drag_target: None,
         };
         app.messages.push("Ready.".to_string());
         app
+    }
+
+    #[cfg(test)]
+    fn new_for_tests(root: PathBuf) -> Self {
+        Self::with_completion_engine(root, CompletionEngine::disabled_for_tests())
+    }
+
+    pub fn tick(&mut self) {
+        while let Some(event) = self.debugger.as_mut().and_then(DebuggerSession::try_recv) {
+            match event {
+                DebuggerEvent::Output(line) => {
+                    if !line.trim().is_empty() {
+                        self.push_message(format!("[dbg] {line}"));
+                    }
+                }
+                DebuggerEvent::Stopped(location) => {
+                    self.debug_location = Some(location.clone());
+                    self.focus_debug_location(&location);
+                    self.status = format!(
+                        "Paused at {}:{}",
+                        relative_label(&self.root, &location.path),
+                        location.line + 1
+                    );
+                }
+                DebuggerEvent::Exited(code) => {
+                    self.debug_location = None;
+                    self.debugger = None;
+                    self.status = match code {
+                        Some(code) => format!("Debug session exited with {code}"),
+                        None => "Debug session exited".to_string(),
+                    };
+                }
+            }
+        }
     }
 
     pub fn refresh_project(&mut self) {
@@ -350,6 +451,7 @@ impl App {
 
     pub fn toggle_focus(&mut self) {
         self.close_menu();
+        self.close_completion();
         self.focus = match self.focus {
             Focus::Project => Focus::Editor,
             Focus::Editor => Focus::Messages,
@@ -360,6 +462,7 @@ impl App {
 
     fn set_focus(&mut self, focus: Focus) {
         self.close_menu();
+        self.close_completion();
         self.focus = focus;
         self.status = format!("Focus: {}", self.focus_name());
     }
@@ -417,16 +520,25 @@ impl App {
         self.open_file_path(path, "Cargo.toml");
     }
 
-    fn open_file_path(&mut self, path: PathBuf, label: impl Into<String>) {
+    fn open_file_path(&mut self, path: PathBuf, label: impl Into<String>) -> bool {
+        if !self.save_dirty_before("Open file") {
+            return false;
+        }
+
         let label = label.into();
         match Editor::open(&path) {
             Ok(editor) => {
                 self.editor = editor;
+                self.close_completion();
                 self.focus = Focus::Editor;
                 self.status = format!("Opened {label}");
                 self.push_message(format!("Opened {}", path.display()));
+                true
             }
-            Err(error) => self.status = format!("Open failed: {error}"),
+            Err(error) => {
+                self.status = format!("Open failed: {error}");
+                false
+            }
         }
     }
 
@@ -453,27 +565,30 @@ impl App {
         } else {
             self.root.clone()
         };
+        self.close_completion();
         self.selected_file = 0;
         self.refresh_project();
         self.focus = Focus::Project;
         self.status = format!("Browsing {}", self.browser_label());
     }
 
-    pub fn save_current(&mut self) {
+    pub fn save_current(&mut self) -> bool {
         self.close_menu();
-        match self.editor.save() {
-            Ok(()) => {
-                self.status = format!("Saved {}", self.current_file_label());
-                self.push_message(format!("Saved {}", self.current_file_label()));
+        self.close_completion();
+        match self.save_editor() {
+            Ok(()) => true,
+            Err(error) => {
+                self.status = format!("Save failed: {error}");
+                false
             }
-            Err(error) => self.status = format!("Save failed: {error}"),
         }
     }
 
     pub fn run_cargo(&mut self, command: &str) {
         self.close_menu();
-        if self.editor.is_dirty() {
-            self.save_current();
+        self.close_completion();
+        if !self.save_dirty_before("Cargo command") {
+            return;
         }
 
         self.push_message(format!("$ cargo {command}"));
@@ -515,6 +630,221 @@ impl App {
                 self.push_message(self.status.clone());
             }
         }
+    }
+
+    fn save_dirty_before(&mut self, action: &str) -> bool {
+        if !self.editor.is_dirty() {
+            return true;
+        }
+
+        match self.save_editor() {
+            Ok(()) => true,
+            Err(error) => {
+                self.status = format!("{action} canceled: save failed: {error}");
+                self.push_message(self.status.clone());
+                false
+            }
+        }
+    }
+
+    fn save_editor(&mut self) -> io::Result<()> {
+        self.editor.save()?;
+        let label = self.current_file_label();
+        self.status = format!("Saved {label}");
+        self.push_message(format!("Saved {label}"));
+        Ok(())
+    }
+
+    pub fn request_completion(&mut self, force: bool) {
+        let Some(response) =
+            self.completion_engine
+                .complete(&self.root, &self.editor, &self.project_files, force)
+        else {
+            if force {
+                self.status = if self.completion_engine.is_language_server_available() {
+                    "No completions available here".to_string()
+                } else {
+                    "No completions available (rust-analyzer unavailable, using fallback mode)"
+                        .to_string()
+                };
+            }
+            self.close_completion();
+            return;
+        };
+
+        let item_count = response.items.len();
+        self.completion_popup = Some(CompletionPopup::from_response(response));
+        self.status = if force && self.completion_engine.is_language_server_available() {
+            format!("Autocomplete: {item_count} suggestion(s)")
+        } else {
+            format!("Autocomplete fallback: {item_count} suggestion(s)")
+        };
+    }
+
+    pub fn close_completion(&mut self) {
+        self.completion_popup = None;
+    }
+
+    pub fn completion_visible(&self) -> bool {
+        self.completion_popup.is_some()
+    }
+
+    fn accept_completion(&mut self) -> bool {
+        let Some(popup) = self.completion_popup.clone() else {
+            return false;
+        };
+        let Some(item) = popup.selected_item() else {
+            return false;
+        };
+        self.editor.replace_range_in_current_line(
+            popup.replace_start,
+            popup.replace_end,
+            &item.insert_text,
+        );
+        self.status = format!("Inserted completion {}", item.label);
+        self.close_completion();
+        true
+    }
+
+    pub fn toggle_breakpoint_at_cursor(&mut self) {
+        let Some(path) = self.editor.path().map(Path::to_path_buf) else {
+            self.status = "Breakpoints require a file-backed buffer".to_string();
+            return;
+        };
+        let line = self.editor.cursor_row();
+        self.toggle_breakpoint(path, line);
+    }
+
+    fn toggle_breakpoint(&mut self, path: PathBuf, line: usize) {
+        let Some(lines) = self.breakpoints.get_mut(&path) else {
+            let mut set = BTreeSet::new();
+            set.insert(line);
+            self.breakpoints.insert(path.clone(), set);
+            self.status = format!(
+                "Breakpoint added at {}:{}",
+                relative_label(&self.root, &path),
+                line + 1
+            );
+            return;
+        };
+
+        if lines.remove(&line) {
+            if lines.is_empty() {
+                self.breakpoints.remove(&path);
+            }
+            self.status = format!(
+                "Breakpoint removed at {}:{}",
+                relative_label(&self.root, &path),
+                line + 1
+            );
+        } else {
+            lines.insert(line);
+            self.status = format!(
+                "Breakpoint added at {}:{}",
+                relative_label(&self.root, &path),
+                line + 1
+            );
+        }
+    }
+
+    pub fn has_breakpoint(&self, path: &Path, line: usize) -> bool {
+        self.breakpoints
+            .get(path)
+            .is_some_and(|lines| lines.contains(&line))
+    }
+
+    pub fn start_or_continue_debug(&mut self) {
+        self.close_menu();
+        self.close_completion();
+        if self.debugger.is_some() {
+            self.debug_command("continue", "Continuing debugger");
+            return;
+        }
+
+        if !self.save_dirty_before("Debug start") {
+            return;
+        }
+
+        let breakpoints = self
+            .breakpoints
+            .iter()
+            .flat_map(|(path, lines)| {
+                lines.iter().map(|line| SourceLocation {
+                    path: path.clone(),
+                    line: *line,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        self.push_message("$ cargo build");
+        match DebuggerSession::start(&self.root, &breakpoints) {
+            Ok(session) => {
+                self.debugger = Some(session);
+                self.debug_location = None;
+                self.focus = Focus::Messages;
+                self.status = if breakpoints.is_empty() {
+                    "Debugging without breakpoints".to_string()
+                } else {
+                    format!("Debugging with {} breakpoint(s)", breakpoints.len())
+                };
+            }
+            Err(error) => {
+                self.status = format!("Could not start debugger: {error}");
+                self.push_message(self.status.clone());
+            }
+        }
+    }
+
+    pub fn stop_debug(&mut self) {
+        if let Some(mut debugger) = self.debugger.take() {
+            let _ = debugger.stop();
+            self.status = "Debug session stopped".to_string();
+        } else {
+            self.status = "No active debug session".to_string();
+        }
+        self.debug_location = None;
+    }
+
+    pub fn debug_step_into(&mut self) {
+        self.debug_command("step", "Step into");
+    }
+
+    pub fn debug_step_over(&mut self) {
+        self.debug_command("next", "Step over");
+    }
+
+    pub fn debug_step_out(&mut self) {
+        self.debug_command("finish", "Step out");
+    }
+
+    fn debug_command(&mut self, command: &str, status: &str) {
+        let Some(debugger) = self.debugger.as_mut() else {
+            self.status = "No active debug session".to_string();
+            return;
+        };
+        match debugger.send(command) {
+            Ok(()) => {
+                self.status = status.to_string();
+                self.focus = Focus::Messages;
+            }
+            Err(error) => self.status = format!("Debugger command failed: {error}"),
+        }
+    }
+
+    pub fn debug_active(&self) -> bool {
+        self.debugger.is_some()
+    }
+
+    fn focus_debug_location(&mut self, location: &SourceLocation) {
+        let current = self.editor.path().map(Path::to_path_buf);
+        if current.as_ref() != Some(&location.path) {
+            let label = relative_label(&self.root, &location.path);
+            if !self.open_file_path(location.path.clone(), label) {
+                return;
+            }
+        }
+        self.editor.set_cursor(location.line, 0);
+        self.focus = Focus::Editor;
     }
 
     pub fn handle_active_key(&mut self, key: KeyEvent) {
@@ -586,6 +916,7 @@ impl App {
 
     fn open_new_file_dialog(&mut self) {
         self.close_menu();
+        self.close_completion();
         self.new_file = NewFileForm::new();
         self.dialog = Some(Dialog::NewFile);
         self.status = format!("New file in {}", self.browser_label());
@@ -593,6 +924,7 @@ impl App {
 
     fn open_new_project_dialog(&mut self) {
         self.close_menu();
+        self.close_completion();
         self.new_project = NewProjectForm::new(&self.browser_dir);
         self.dialog = Some(Dialog::NewProject);
         self.status = "New Cargo project".to_string();
@@ -707,6 +1039,10 @@ impl App {
             return;
         }
 
+        if !self.save_dirty_before("New project") {
+            return;
+        }
+
         if let Err(error) = fs::create_dir_all(&parent) {
             self.status = format!("Could not create parent directory: {error}");
             return;
@@ -735,10 +1071,14 @@ impl App {
                 }
 
                 if output.status.success() {
+                    self.stop_debug();
                     self.root = target.canonicalize().unwrap_or(target);
                     self.browser_dir = self.root.clone();
                     self.selected_file = 0;
                     self.editor = Editor::scratch();
+                    self.breakpoints.clear();
+                    self.completion_engine.refresh_root(&self.root);
+                    self.close_completion();
                     self.dialog = None;
                     self.refresh_project();
                     self.status = format!("Created {} project {}", kind.label(), name);
@@ -771,6 +1111,7 @@ impl App {
     }
 
     pub fn open_menu(&mut self) {
+        self.close_completion();
         self.menu_open = true;
         self.active_menu = self.active_menu.min(MENUS.len() - 1);
         self.active_menu_item = first_selectable_item(self.active_menu);
@@ -877,7 +1218,9 @@ impl App {
             MenuAction::NewProject => self.open_new_project_dialog(),
             MenuAction::Open => self.open_selected_file(),
             MenuAction::OpenManifest => self.open_manifest(),
-            MenuAction::Save => self.save_current(),
+            MenuAction::Save => {
+                self.save_current();
+            }
             MenuAction::Quit => return Action::Quit,
             MenuAction::Undo => self.undo_editor(),
             MenuAction::Redo => self.redo_editor(),
@@ -890,6 +1233,12 @@ impl App {
             MenuAction::CargoTest => self.run_cargo("test"),
             MenuAction::CargoCheck => self.run_cargo("check"),
             MenuAction::CargoBuild => self.run_cargo("build"),
+            MenuAction::DebugStartOrContinue => self.start_or_continue_debug(),
+            MenuAction::DebugStepInto => self.debug_step_into(),
+            MenuAction::DebugStepOver => self.debug_step_over(),
+            MenuAction::DebugStepOut => self.debug_step_out(),
+            MenuAction::DebugStop => self.stop_debug(),
+            MenuAction::ToggleBreakpoint => self.toggle_breakpoint_at_cursor(),
             MenuAction::ToggleFocus => self.toggle_focus(),
             MenuAction::FocusProject => self.set_focus(Focus::Project),
             MenuAction::FocusEditor => self.set_focus(Focus::Editor),
@@ -984,6 +1333,7 @@ impl App {
         self.help_open = false;
         self.focus = Focus::Editor;
         self.editor.insert_text(text);
+        self.close_completion();
         self.status = format!("Pasted {} characters", text.chars().count());
     }
 
@@ -1028,6 +1378,21 @@ impl App {
             return Action::None;
         }
 
+        if contains(self.geometry.menu.run_button, column, row) {
+            self.run_cargo("run");
+            return Action::None;
+        }
+
+        if contains(self.geometry.menu.debug_button, column, row) {
+            self.start_or_continue_debug();
+            return Action::None;
+        }
+
+        if contains(self.geometry.menu.breakpoint_button, column, row) {
+            self.toggle_breakpoint_at_cursor();
+            return Action::None;
+        }
+
         if contains(self.geometry.menu_area, column, row) {
             self.open_menu();
             if let Some(menu_index) = menu_bar_index_at(&self.geometry.menu, column, row) {
@@ -1060,23 +1425,37 @@ impl App {
         }
 
         if contains(self.geometry.project_inner, column, row) {
+            self.close_completion();
             self.focus = Focus::Project;
             self.select_project_file_at(row);
         } else if contains(self.geometry.editor_inner, column, row) {
             self.focus = Focus::Editor;
+            if self.is_breakpoint_gutter(column) {
+                let file_row = self
+                    .editor
+                    .row_offset()
+                    .saturating_add(row.saturating_sub(self.geometry.editor_inner.y) as usize);
+                if let Some(path) = self.editor.path().map(Path::to_path_buf) {
+                    self.toggle_breakpoint(path, file_row);
+                }
+                return Action::None;
+            }
             self.place_cursor_at(column, row, false);
             self.drag_target = Some(DragTarget::EditorSelection);
         } else if contains(self.geometry.messages_inner, column, row) {
+            self.close_completion();
             self.focus = Focus::Messages;
             self.select_message_at(row);
             self.status = "Focus: Messages".to_string();
         } else if contains(self.geometry.project_area, column, row) {
+            self.close_completion();
             self.focus = Focus::Project;
             self.status = "Focus: Project".to_string();
         } else if contains(self.geometry.editor_area, column, row) {
             self.focus = Focus::Editor;
             self.status = "Focus: Edit".to_string();
         } else if contains(self.geometry.messages_area, column, row) {
+            self.close_completion();
             self.focus = Focus::Messages;
             self.status = "Focus: Messages".to_string();
         }
@@ -1154,10 +1533,20 @@ impl App {
     }
 
     fn handle_editor_key(&mut self, key: KeyEvent) {
+        if self.handle_completion_popup_key(key) {
+            return;
+        }
+
         if key.modifiers.contains(KeyModifiers::ALT) {
             match key.code {
-                KeyCode::Char('x') | KeyCode::Char('X') => self.editor.delete_line(),
-                KeyCode::Char('u') | KeyCode::Char('U') => self.editor.duplicate_line(),
+                KeyCode::Char('x') | KeyCode::Char('X') => {
+                    self.editor.delete_line();
+                    self.close_completion();
+                }
+                KeyCode::Char('u') | KeyCode::Char('U') => {
+                    self.editor.duplicate_line();
+                    self.close_completion();
+                }
                 _ => {}
             }
             return;
@@ -1165,32 +1554,144 @@ impl App {
 
         let selecting = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
-            KeyCode::Left if selecting => self.editor.extend_left(),
-            KeyCode::Left => self.editor.move_left(),
-            KeyCode::Right if selecting => self.editor.extend_right(),
-            KeyCode::Right => self.editor.move_right(),
-            KeyCode::Up if selecting => self.editor.extend_up(),
-            KeyCode::Up => self.editor.move_up(),
-            KeyCode::Down if selecting => self.editor.extend_down(),
-            KeyCode::Down => self.editor.move_down(),
-            KeyCode::Home if selecting => self.editor.extend_home(),
-            KeyCode::Home => self.editor.home(),
-            KeyCode::End if selecting => self.editor.extend_end(),
-            KeyCode::End => self.editor.end(),
-            KeyCode::PageUp if selecting => self.editor.extend_page_up(12),
-            KeyCode::PageUp => self.editor.page_up(12),
-            KeyCode::PageDown if selecting => self.editor.extend_page_down(12),
-            KeyCode::PageDown => self.editor.page_down(12),
-            KeyCode::Backspace => self.editor.backspace(),
-            KeyCode::Delete => self.editor.delete(),
-            KeyCode::Enter => self.editor.insert_newline(),
+            KeyCode::Left if selecting => {
+                self.editor.extend_left();
+                self.close_completion();
+            }
+            KeyCode::Left => {
+                self.editor.move_left();
+                self.close_completion();
+            }
+            KeyCode::Right if selecting => {
+                self.editor.extend_right();
+                self.close_completion();
+            }
+            KeyCode::Right => {
+                self.editor.move_right();
+                self.close_completion();
+            }
+            KeyCode::Up if selecting => {
+                self.editor.extend_up();
+                self.close_completion();
+            }
+            KeyCode::Up => {
+                self.editor.move_up();
+                self.close_completion();
+            }
+            KeyCode::Down if selecting => {
+                self.editor.extend_down();
+                self.close_completion();
+            }
+            KeyCode::Down => {
+                self.editor.move_down();
+                self.close_completion();
+            }
+            KeyCode::Home if selecting => {
+                self.editor.extend_home();
+                self.close_completion();
+            }
+            KeyCode::Home => {
+                self.editor.home();
+                self.close_completion();
+            }
+            KeyCode::End if selecting => {
+                self.editor.extend_end();
+                self.close_completion();
+            }
+            KeyCode::End => {
+                self.editor.end();
+                self.close_completion();
+            }
+            KeyCode::PageUp if selecting => {
+                self.editor.extend_page_up(12);
+                self.close_completion();
+            }
+            KeyCode::PageUp => {
+                self.editor.page_up(12);
+                self.close_completion();
+            }
+            KeyCode::PageDown if selecting => {
+                self.editor.extend_page_down(12);
+                self.close_completion();
+            }
+            KeyCode::PageDown => {
+                self.editor.page_down(12);
+                self.close_completion();
+            }
+            KeyCode::Backspace => {
+                self.editor.backspace();
+                self.request_completion(false);
+            }
+            KeyCode::Delete => {
+                self.editor.delete();
+                self.request_completion(false);
+            }
+            KeyCode::Enter => {
+                self.editor.insert_newline();
+                self.close_completion();
+            }
             KeyCode::Char(character) => {
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
                     self.editor.insert_char(character);
+                    if character.is_alphanumeric() || matches!(character, '_' | '.') {
+                        self.request_completion(false);
+                    } else {
+                        self.close_completion();
+                    }
                 }
             }
-            _ => {}
+            _ => self.close_completion(),
         }
+    }
+
+    fn handle_completion_popup_key(&mut self, key: KeyEvent) -> bool {
+        let visible_rows = self.completion_visible_rows();
+        let Some(popup) = self.completion_popup.as_mut() else {
+            return false;
+        };
+
+        match key.code {
+            KeyCode::Up => {
+                popup.selected = popup.selected.saturating_sub(1);
+                popup.keep_selected_visible(visible_rows);
+                true
+            }
+            KeyCode::Down => {
+                if !popup.items.is_empty() {
+                    popup.selected = (popup.selected + 1).min(popup.items.len() - 1);
+                }
+                popup.keep_selected_visible(visible_rows);
+                true
+            }
+            KeyCode::PageUp => {
+                popup.selected = popup.selected.saturating_sub(8);
+                popup.keep_selected_visible(visible_rows);
+                true
+            }
+            KeyCode::PageDown => {
+                if !popup.items.is_empty() {
+                    popup.selected = (popup.selected + 8).min(popup.items.len() - 1);
+                }
+                popup.keep_selected_visible(visible_rows);
+                true
+            }
+            KeyCode::Enter => self.accept_completion(),
+            KeyCode::Esc => {
+                self.close_completion();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn completion_visible_rows(&self) -> usize {
+        usize::from(
+            self.geometry
+                .editor_inner
+                .height
+                .saturating_sub(2)
+                .clamp(1, 8),
+        )
     }
 
     fn handle_message_key(&mut self, key: KeyEvent) {
@@ -1294,8 +1795,7 @@ impl App {
 
     fn place_cursor_at(&mut self, column: u16, row: u16, selecting: bool) {
         let inner = self.geometry.editor_inner;
-        let line_number_width = self.editor_line_number_width();
-        let text_x = inner.x.saturating_add(line_number_width);
+        let text_x = inner.x.saturating_add(self.editor_gutter_width());
         let file_row = self
             .editor
             .row_offset()
@@ -1321,7 +1821,23 @@ impl App {
     }
 
     pub fn editor_line_number_width(&self) -> u16 {
-        (self.editor.lines().len().max(1).to_string().len().max(3) + 1) as u16
+        self.editor.lines().len().max(1).to_string().len().max(3) as u16
+    }
+
+    pub fn editor_gutter_width(&self) -> u16 {
+        self.editor_line_number_width() + 3
+    }
+
+    pub fn paused_line(&self, path: &Path, line: usize) -> bool {
+        self.debug_location
+            .as_ref()
+            .is_some_and(|location| location.path == path && location.line == line)
+    }
+
+    fn is_breakpoint_gutter(&self, column: u16) -> bool {
+        let gutter_start = self.geometry.editor_inner.x;
+        let gutter_end = gutter_start.saturating_add(2);
+        column >= gutter_start && column <= gutter_end
     }
 
     fn is_project_divider(&self, column: u16, row: u16) -> bool {
@@ -1396,6 +1912,13 @@ fn output_lines(bytes: &[u8]) -> Vec<String> {
         .lines()
         .map(|line| line.to_string())
         .collect()
+}
+
+fn relative_label(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .ok()
+        .map(|relative| relative.display().to_string())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 fn timestamp() -> String {
@@ -1488,4 +2011,104 @@ fn menu_dropdown_item_at(
     let item_index = row.saturating_sub(inner_y) as usize;
     let item = MENUS[active_menu].items.get(item_index)?;
     (!item.separator).then_some((active_menu, item_index))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ide::CompletionKind;
+
+    #[test]
+    fn saves_dirty_file_before_switching_files() {
+        let root = temp_project("dirty-switch");
+        let first = root.join("src").join("first.rs");
+        let second = root.join("src").join("second.rs");
+        fs::write(&first, "first").unwrap();
+        fs::write(&second, "second").unwrap();
+
+        let mut app = App::new_for_tests(root.clone());
+        app.open_file_path(first.clone(), "first.rs");
+        app.editor.insert_text("dirty ");
+        app.open_file_path(second.clone(), "second.rs");
+
+        assert_eq!(fs::read_to_string(&first).unwrap(), "dirty first");
+        assert_eq!(app.editor.path(), Some(second.as_path()));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn completion_popup_keeps_selected_item_visible() {
+        let mut popup = CompletionPopup {
+            items: (0..12)
+                .map(|index| CompletionCandidate {
+                    label: format!("item{index}"),
+                    insert_text: format!("item{index}"),
+                    detail: None,
+                    kind: CompletionKind::Keyword,
+                })
+                .collect(),
+            selected: 0,
+            scroll: 0,
+            replace_start: 0,
+            replace_end: 0,
+        };
+
+        popup.selected = 8;
+        popup.keep_selected_visible(8);
+        assert_eq!(popup.scroll, 1);
+
+        popup.selected = 11;
+        popup.keep_selected_visible(8);
+        assert_eq!(popup.scroll, 4);
+
+        popup.selected = 2;
+        popup.keep_selected_visible(8);
+        assert_eq!(popup.scroll, 2);
+    }
+
+    #[test]
+    fn debug_focus_keeps_current_file_when_target_open_fails() {
+        let root = temp_project("debug-open-fails");
+        let first = root.join("src").join("first.rs");
+        let missing = root.join("src").join("missing.rs");
+        fs::write(
+            &first,
+            [
+                "fn main() {",
+                "    println!(\"one\");",
+                "    println!(\"two\");",
+                "}",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let mut app = App::new_for_tests(root.clone());
+        app.open_file_path(first.clone(), "first.rs");
+        app.focus_debug_location(&SourceLocation {
+            path: missing,
+            line: 2,
+        });
+
+        assert_eq!(app.editor.path(), Some(first.as_path()));
+        assert_eq!(app.editor.cursor_row(), 0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn temp_project(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("trust-{name}-{unique}"));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"trust_test\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        root
+    }
 }

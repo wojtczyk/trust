@@ -1,6 +1,8 @@
 mod app;
 mod clipboard;
+mod debugger;
 mod editor;
+mod ide;
 mod project;
 mod ui;
 
@@ -81,7 +83,9 @@ fn print_usage() {
     println!("Usage:");
     println!("  trust [PROJECT_PATH]");
     println!();
-    println!("Keys: F1 Help, F2 Save, F3 Open, F5 Run, F7 Check, F9 Build, Ctrl+Z Undo, Ctrl+Y Redo, Ctrl+Q Quit");
+    println!(
+        "Keys: F1 Help, F2 Save, F3 Open, F5 Run, F6 Breakpoint, Ctrl+D Debug, F11/F12 Step, Ctrl+Space Complete, Ctrl+Z Undo, Ctrl+Y Redo, Ctrl+Q Quit"
+    );
 }
 
 fn setup_terminal() -> io::Result<TerminalUi> {
@@ -109,6 +113,7 @@ fn restore_terminal(terminal: &mut TerminalUi) -> io::Result<()> {
 
 fn run(terminal: &mut TerminalUi, app: &mut App) -> io::Result<()> {
     loop {
+        app.tick();
         terminal.draw(|frame| ui::draw(frame, app))?;
 
         if event::poll(Duration::from_millis(120))? {
@@ -167,12 +172,16 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
             KeyCode::Char('v') | KeyCode::Char('V') => app.paste_from_clipboard(),
             KeyCode::Char('z') | KeyCode::Char('Z') => app.undo_editor(),
             KeyCode::Char('y') | KeyCode::Char('Y') => app.redo_editor(),
-            KeyCode::Char('s') | KeyCode::Char('S') => app.save_current(),
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                app.save_current();
+            }
             KeyCode::Char('f') | KeyCode::Char('F') => app.toggle_focus(),
             KeyCode::Char('o') | KeyCode::Char('O') => app.open_selected_file(),
             KeyCode::Char('r') | KeyCode::Char('R') => app.run_cargo("run"),
             KeyCode::Char('t') | KeyCode::Char('T') => app.run_cargo("test"),
             KeyCode::Char('b') | KeyCode::Char('B') => app.run_cargo("build"),
+            KeyCode::Char('d') | KeyCode::Char('D') => app.start_or_continue_debug(),
+            KeyCode::Char(' ') => app.request_completion(true),
             _ => {}
         }
         return Action::None;
@@ -180,17 +189,28 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
 
     match key.code {
         KeyCode::Esc => {
+            if app.completion_visible() {
+                app.close_completion();
+                return Action::None;
+            }
             return Action::Quit;
         }
         KeyCode::F(1) => app.help_open = true,
-        KeyCode::F(2) => app.save_current(),
+        KeyCode::F(2) => {
+            app.save_current();
+        }
         KeyCode::F(3) => app.open_selected_file(),
         KeyCode::F(4) => app.toggle_focus(),
+        KeyCode::F(5) if key.modifiers.contains(KeyModifiers::SHIFT) => app.stop_debug(),
         KeyCode::F(5) => app.run_cargo("run"),
+        KeyCode::F(6) => app.toggle_breakpoint_at_cursor(),
         KeyCode::F(7) => app.run_cargo("check"),
         KeyCode::F(8) => app.run_cargo("test"),
         KeyCode::F(9) => app.run_cargo("build"),
         KeyCode::F(10) => app.toggle_menu(),
+        KeyCode::F(11) if key.modifiers.contains(KeyModifiers::SHIFT) => app.debug_step_out(),
+        KeyCode::F(11) => app.debug_step_into(),
+        KeyCode::F(12) => app.debug_step_over(),
         KeyCode::Tab => app.toggle_focus(),
         KeyCode::BackTab => app.toggle_focus(),
         _ => app.handle_active_key(key),

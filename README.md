@@ -6,6 +6,14 @@ development environments.
 Status: experimental nostalgia project. It edits files, browses Rust projects,
 and runs Cargo commands.
 
+## New IDE Features
+
+- `rust-analyzer` powered autocomplete for Rust files, with a built-in fallback
+  completion list if the language server is unavailable.
+- Clickable top-bar `Run`, `Debug`, and `BP` controls.
+- Source-level breakpoints in the editor gutter and a basic LLDB-backed debug
+  loop with continue and stepping commands.
+
 ## Screenshots
 
 Building and running "Hello World" in TRUST.
@@ -47,19 +55,27 @@ If no path is supplied, TRUST opens the current directory.
 - `Backspace`: go to the parent directory in the project pane
 - `F4` / `Tab` / `Ctrl+F`: cycle focus
 - `F5` / `Ctrl+R`: `cargo run`
+- `F6`: toggle breakpoint on the current line
 - `F7`: `cargo check`
 - `F8` / `Ctrl+T`: `cargo test`
 - `F9` / `Ctrl+B`: `cargo build`
 - `F10`: open the menu bar
 - `Ctrl+Z`: undo
 - `Ctrl+Y` / `Ctrl+Shift+Z`: redo
+- `F11`: debugger step into
+- `F12`: debugger step over
+- `Shift+F11`: debugger step out
+- `Shift+F5`: stop the active debug session
 - `Ctrl+C`: copy selected text
+- `Ctrl+D`: start or continue the debugger
+- `Ctrl+Space`: request autocomplete suggestions
 - `Ctrl+V`: paste clipboard text
 - `Ctrl+X`: cut selected text
 - `Esc` / `Ctrl+Q`: quit
 - `Alt+X`: delete line
 - `Alt+U`: duplicate line
 - `Shift+Navigation`: select text
+- In the editor, `Enter` inserts an auto-indented new line.
 
 ## Menus
 
@@ -70,6 +86,7 @@ If no path is supplied, TRUST opens the current directory.
 - `Esc` closes the menu.
 - Mouse clicks on the menu bar and dropdown items work too.
 - `Edit` now includes `Undo` and `Redo`.
+- `Debug` contains start/continue, breakpoint, step, and stop commands.
 - `File > New` asks for a filename and creates it in the current project pane
   directory.
 - `Project > New project` opens the Cargo project dialog with parent directory,
@@ -79,7 +96,9 @@ If no path is supplied, TRUST opens the current directory.
 ## Mouse
 
 - Click inside the editor to move the cursor.
+- Click inside the left editor gutter, or use `F6`, to toggle a breakpoint.
 - Drag inside the editor to select text.
+- Click the top bar `Run`, `Debug`, or `BP` buttons to trigger those actions.
 - Click inside the project pane to open editable files or navigate directories.
 - Click inside any pane to focus it.
 - Drag the vertical divider between project and editor panes to resize them.
