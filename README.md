@@ -73,6 +73,7 @@ If no path is supplied, TRUST opens the current directory.
 - `Alt+X`: delete line
 - `Alt+U`: duplicate line
 - `Shift+Navigation`: select text
+- In the editor, `Enter` inserts an auto-indented new line.
 
 ## Menus
 
