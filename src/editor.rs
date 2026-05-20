@@ -454,12 +454,28 @@ impl Editor {
     ) {
         self.clear_selection();
         let row = self.cursor_row;
-        let start_byte = char_to_byte(&self.lines[row], start_col);
-        let end_byte = char_to_byte(&self.lines[row], end_col);
-        self.lines[row].replace_range(start_byte..end_byte, replacement);
-        self.cursor_col = start_col + replacement.chars().count();
-        self.dirty = true;
-        self.keep_cursor_visible();
+        let line_len = self.line_len(row);
+        let start_col = start_col.min(line_len);
+        let end_col = end_col.min(line_len);
+        let (start_col, end_col) = if start_col <= end_col {
+            (start_col, end_col)
+        } else {
+            (end_col, start_col)
+        };
+
+        self.set_cursor_position(Position {
+            row,
+            col: start_col,
+        });
+        if start_col != end_col {
+            self.selection_anchor = Some(Position {
+                row,
+                col: start_col,
+            });
+            self.set_cursor_position(Position { row, col: end_col });
+            self.delete_selection();
+        }
+        self.insert_text(replacement);
     }
 
     fn move_cursor(&mut self, movement: Movement, selecting: bool) {
@@ -670,5 +686,23 @@ mod tests {
 
         assert_eq!(editor.lines(), &["println!".to_string()]);
         assert_eq!(editor.cursor_col(), 8);
+    }
+
+    #[test]
+    fn replaces_completion_range_with_multiline_snippet() {
+        let mut editor = Editor::scratch();
+        editor.insert_text("ma");
+        editor.replace_range_in_current_line(0, 2, "match value {\n    _ => {}\n}");
+
+        assert_eq!(
+            editor.lines(),
+            &[
+                "match value {".to_string(),
+                "    _ => {}".to_string(),
+                "}".to_string(),
+            ]
+        );
+        assert_eq!(editor.cursor_row(), 2);
+        assert_eq!(editor.cursor_col(), 1);
     }
 }

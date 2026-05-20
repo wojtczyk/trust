@@ -47,6 +47,11 @@ impl CompletionEngine {
         Self { client }
     }
 
+    #[cfg(test)]
+    pub fn disabled_for_tests() -> Self {
+        Self { client: None }
+    }
+
     pub fn refresh_root(&mut self, root: &Path) {
         self.client = LanguageClient::new(root).ok();
     }
@@ -170,7 +175,7 @@ fn fallback_items(
         }
     }
 
-    items.sort_by(|left, right| completion_rank(left, prefix).cmp(&completion_rank(right, prefix)));
+    items.sort_by_key(|item| completion_rank(item, prefix));
     items
 }
 
@@ -238,10 +243,10 @@ fn project_tokens(text: &str, line: &str, project_files: &[ProjectEntry]) -> BTr
     }
 
     for entry in project_files {
-        if let Some(stem) = entry.path.file_stem().and_then(|stem| stem.to_str()) {
-            if is_identifier_like(stem) {
-                tokens.insert(stem.to_string());
-            }
+        if let Some(stem) = entry.path.file_stem().and_then(|stem| stem.to_str())
+            && is_identifier_like(stem)
+        {
+            tokens.insert(stem.to_string());
         }
     }
 
@@ -264,44 +269,10 @@ fn is_identifier_like(token: &str) -> bool {
 
 fn rust_keywords() -> &'static [&'static str] {
     &[
-        "as",
-        "async",
-        "await",
-        "break",
-        "const",
-        "continue",
-        "crate",
-        "dyn",
-        "else",
-        "enum",
-        "extern",
-        "false",
-        "fn",
-        "for",
-        "if",
-        "impl",
-        "in",
-        "let",
-        "loop",
-        "match",
-        "mod",
-        "move",
-        "mut",
-        "pub",
-        "ref",
-        "return",
-        "Self",
-        "self",
-        "static",
-        "struct",
-        "super",
-        "trait",
-        "true",
-        "type",
-        "unsafe",
-        "use",
-        "where",
-        "while",
+        "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
+        "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move",
+        "mut", "pub", "ref", "return", "Self", "self", "static", "struct", "super", "trait",
+        "true", "type", "unsafe", "use", "where", "while",
     ]
 }
 
@@ -350,10 +321,10 @@ impl LanguageClient {
             loop {
                 match read_lsp_message(&mut reader) {
                     Ok(Some(message)) => {
-                        if let Ok(value) = serde_json::from_str::<Value>(&message) {
-                            if sender.send(value).is_err() {
-                                break;
-                            }
+                        if let Ok(value) = serde_json::from_str::<Value>(&message)
+                            && sender.send(value).is_err()
+                        {
+                            break;
                         }
                     }
                     Ok(None) => break,
@@ -489,10 +460,9 @@ impl LanguageClient {
                 ));
             };
 
-            let message = self
-                .incoming
-                .recv_timeout(remaining)
-                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "rust-analyzer did not reply"))?;
+            let message = self.incoming.recv_timeout(remaining).map_err(|_| {
+                io::Error::new(io::ErrorKind::TimedOut, "rust-analyzer did not reply")
+            })?;
 
             let message_id = message.get("id").and_then(Value::as_u64);
             if message_id == Some(id) {
@@ -564,7 +534,10 @@ fn parse_completion_response(value: Value) -> Vec<CompletionCandidate> {
             .or_else(|| item.get("insertText").and_then(Value::as_str))
             .unwrap_or(label);
         let insert_text = strip_snippet_placeholders(insert_text);
-        let detail = item.get("detail").and_then(Value::as_str).map(ToString::to_string);
+        let detail = item
+            .get("detail")
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
         result.push(CompletionCandidate {
             label: label.to_string(),
             insert_text,
@@ -637,10 +610,7 @@ fn read_lsp_message(reader: &mut impl BufRead) -> io::Result<Option<String>> {
 }
 
 fn utf16_col(line: &str, col: usize) -> usize {
-    line.chars()
-        .take(col)
-        .map(char::len_utf16)
-        .sum::<usize>()
+    line.chars().take(col).map(char::len_utf16).sum::<usize>()
 }
 
 fn path_to_uri(path: &Path) -> String {
@@ -648,14 +618,9 @@ fn path_to_uri(path: &Path) -> String {
     let mut uri = String::from("file://");
     for byte in path.to_string_lossy().as_bytes() {
         match byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'/'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~' => uri.push(*byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
+                uri.push(*byte as char)
+            }
             _ => uri.push_str(&format!("%{:02X}", byte)),
         }
     }

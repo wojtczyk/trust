@@ -290,6 +290,7 @@ pub struct Geometry {
 pub struct CompletionPopup {
     pub items: Vec<CompletionCandidate>,
     pub selected: usize,
+    pub scroll: usize,
     pub replace_start: usize,
     pub replace_end: usize,
 }
@@ -299,6 +300,7 @@ impl CompletionPopup {
         Self {
             items: response.items,
             selected: 0,
+            scroll: 0,
             replace_start: response.replace_start,
             replace_end: response.replace_end,
         }
@@ -306,6 +308,19 @@ impl CompletionPopup {
 
     fn selected_item(&self) -> Option<&CompletionCandidate> {
         self.items.get(self.selected)
+    }
+
+    fn keep_selected_visible(&mut self, visible_rows: usize) {
+        let visible_rows = visible_rows.max(1);
+        if self.selected < self.scroll {
+            self.scroll = self.selected;
+        } else if self.selected >= self.scroll + visible_rows {
+            self.scroll = self.selected + 1 - visible_rows;
+        }
+
+        self.scroll = self
+            .scroll
+            .min(self.items.len().saturating_sub(visible_rows));
     }
 }
 
@@ -346,6 +361,10 @@ pub struct App {
 
 impl App {
     pub fn new(root: PathBuf) -> Self {
+        Self::with_completion_engine(root.clone(), CompletionEngine::new(&root))
+    }
+
+    fn with_completion_engine(root: PathBuf, completion_engine: CompletionEngine) -> Self {
         let mut app = Self {
             browser_dir: root.clone(),
             new_project: NewProjectForm::new(&root),
@@ -370,12 +389,17 @@ impl App {
             completion_popup: None,
             breakpoints: BTreeMap::new(),
             debug_location: None,
-            completion_engine: CompletionEngine::new(&root),
+            completion_engine,
             debugger: None,
             drag_target: None,
         };
         app.messages.push("Ready.".to_string());
         app
+    }
+
+    #[cfg(test)]
+    fn new_for_tests(root: PathBuf) -> Self {
+        Self::with_completion_engine(root, CompletionEngine::disabled_for_tests())
     }
 
     pub fn tick(&mut self) {
@@ -492,6 +516,10 @@ impl App {
     }
 
     fn open_file_path(&mut self, path: PathBuf, label: impl Into<String>) {
+        if !self.save_dirty_before("Open file") {
+            return;
+        }
+
         let label = label.into();
         match Editor::open(&path) {
             Ok(editor) => {
@@ -535,23 +563,23 @@ impl App {
         self.status = format!("Browsing {}", self.browser_label());
     }
 
-    pub fn save_current(&mut self) {
+    pub fn save_current(&mut self) -> bool {
         self.close_menu();
         self.close_completion();
-        match self.editor.save() {
-            Ok(()) => {
-                self.status = format!("Saved {}", self.current_file_label());
-                self.push_message(format!("Saved {}", self.current_file_label()));
+        match self.save_editor() {
+            Ok(()) => true,
+            Err(error) => {
+                self.status = format!("Save failed: {error}");
+                false
             }
-            Err(error) => self.status = format!("Save failed: {error}"),
         }
     }
 
     pub fn run_cargo(&mut self, command: &str) {
         self.close_menu();
         self.close_completion();
-        if self.editor.is_dirty() {
-            self.save_current();
+        if !self.save_dirty_before("Cargo command") {
+            return;
         }
 
         self.push_message(format!("$ cargo {command}"));
@@ -595,10 +623,33 @@ impl App {
         }
     }
 
+    fn save_dirty_before(&mut self, action: &str) -> bool {
+        if !self.editor.is_dirty() {
+            return true;
+        }
+
+        match self.save_editor() {
+            Ok(()) => true,
+            Err(error) => {
+                self.status = format!("{action} canceled: save failed: {error}");
+                self.push_message(self.status.clone());
+                false
+            }
+        }
+    }
+
+    fn save_editor(&mut self) -> io::Result<()> {
+        self.editor.save()?;
+        let label = self.current_file_label();
+        self.status = format!("Saved {label}");
+        self.push_message(format!("Saved {label}"));
+        Ok(())
+    }
+
     pub fn request_completion(&mut self, force: bool) {
-        let Some(response) = self
-            .completion_engine
-            .complete(&self.root, &self.editor, &self.project_files, force)
+        let Some(response) =
+            self.completion_engine
+                .complete(&self.root, &self.editor, &self.project_files, force)
         else {
             if force {
                 self.status = if self.completion_engine.is_language_server_available() {
@@ -660,7 +711,11 @@ impl App {
             let mut set = BTreeSet::new();
             set.insert(line);
             self.breakpoints.insert(path.clone(), set);
-            self.status = format!("Breakpoint added at {}:{}", relative_label(&self.root, &path), line + 1);
+            self.status = format!(
+                "Breakpoint added at {}:{}",
+                relative_label(&self.root, &path),
+                line + 1
+            );
             return;
         };
 
@@ -675,7 +730,11 @@ impl App {
             );
         } else {
             lines.insert(line);
-            self.status = format!("Breakpoint added at {}:{}", relative_label(&self.root, &path), line + 1);
+            self.status = format!(
+                "Breakpoint added at {}:{}",
+                relative_label(&self.root, &path),
+                line + 1
+            );
         }
     }
 
@@ -693,8 +752,8 @@ impl App {
             return;
         }
 
-        if self.editor.is_dirty() {
-            self.save_current();
+        if !self.save_dirty_before("Debug start") {
+            return;
         }
 
         let breakpoints = self
@@ -969,6 +1028,10 @@ impl App {
             return;
         }
 
+        if !self.save_dirty_before("New project") {
+            return;
+        }
+
         if let Err(error) = fs::create_dir_all(&parent) {
             self.status = format!("Could not create parent directory: {error}");
             return;
@@ -1144,7 +1207,9 @@ impl App {
             MenuAction::NewProject => self.open_new_project_dialog(),
             MenuAction::Open => self.open_selected_file(),
             MenuAction::OpenManifest => self.open_manifest(),
-            MenuAction::Save => self.save_current(),
+            MenuAction::Save => {
+                self.save_current();
+            }
             MenuAction::Quit => return Action::Quit,
             MenuAction::Copy => self.copy_selection(),
             MenuAction::Cut => self.cut_selection(),
@@ -1535,6 +1600,7 @@ impl App {
     }
 
     fn handle_completion_popup_key(&mut self, key: KeyEvent) -> bool {
+        let visible_rows = self.completion_visible_rows();
         let Some(popup) = self.completion_popup.as_mut() else {
             return false;
         };
@@ -1542,22 +1608,26 @@ impl App {
         match key.code {
             KeyCode::Up => {
                 popup.selected = popup.selected.saturating_sub(1);
+                popup.keep_selected_visible(visible_rows);
                 true
             }
             KeyCode::Down => {
                 if !popup.items.is_empty() {
                     popup.selected = (popup.selected + 1).min(popup.items.len() - 1);
                 }
+                popup.keep_selected_visible(visible_rows);
                 true
             }
             KeyCode::PageUp => {
                 popup.selected = popup.selected.saturating_sub(8);
+                popup.keep_selected_visible(visible_rows);
                 true
             }
             KeyCode::PageDown => {
                 if !popup.items.is_empty() {
                     popup.selected = (popup.selected + 8).min(popup.items.len() - 1);
                 }
+                popup.keep_selected_visible(visible_rows);
                 true
             }
             KeyCode::Enter => self.accept_completion(),
@@ -1567,6 +1637,16 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    fn completion_visible_rows(&self) -> usize {
+        usize::from(
+            self.geometry
+                .editor_inner
+                .height
+                .saturating_sub(2)
+                .clamp(1, 8),
+        )
     }
 
     fn handle_message_key(&mut self, key: KeyEvent) {
@@ -1886,4 +1966,74 @@ fn menu_dropdown_item_at(
     let item_index = row.saturating_sub(inner_y) as usize;
     let item = MENUS[active_menu].items.get(item_index)?;
     (!item.separator).then_some((active_menu, item_index))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ide::CompletionKind;
+
+    #[test]
+    fn saves_dirty_file_before_switching_files() {
+        let root = temp_project("dirty-switch");
+        let first = root.join("src").join("first.rs");
+        let second = root.join("src").join("second.rs");
+        fs::write(&first, "first").unwrap();
+        fs::write(&second, "second").unwrap();
+
+        let mut app = App::new_for_tests(root.clone());
+        app.open_file_path(first.clone(), "first.rs");
+        app.editor.insert_text("dirty ");
+        app.open_file_path(second.clone(), "second.rs");
+
+        assert_eq!(fs::read_to_string(&first).unwrap(), "dirty first");
+        assert_eq!(app.editor.path(), Some(second.as_path()));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn completion_popup_keeps_selected_item_visible() {
+        let mut popup = CompletionPopup {
+            items: (0..12)
+                .map(|index| CompletionCandidate {
+                    label: format!("item{index}"),
+                    insert_text: format!("item{index}"),
+                    detail: None,
+                    kind: CompletionKind::Keyword,
+                })
+                .collect(),
+            selected: 0,
+            scroll: 0,
+            replace_start: 0,
+            replace_end: 0,
+        };
+
+        popup.selected = 8;
+        popup.keep_selected_visible(8);
+        assert_eq!(popup.scroll, 1);
+
+        popup.selected = 11;
+        popup.keep_selected_visible(8);
+        assert_eq!(popup.scroll, 4);
+
+        popup.selected = 2;
+        popup.keep_selected_visible(8);
+        assert_eq!(popup.scroll, 2);
+    }
+
+    fn temp_project(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("trust-{name}-{unique}"));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"trust_test\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        root
+    }
 }

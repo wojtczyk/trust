@@ -160,9 +160,7 @@ fn draw_menu(frame: &mut Frame, area: Rect, app: &mut App) {
     let padding = (area.width as usize).saturating_sub(left_width + buttons_width);
     spans.push(Span::styled(" ".repeat(padding), base));
 
-    let mut button_x = area
-        .x
-        .saturating_add((left_width + padding) as u16);
+    let mut button_x = area.x.saturating_add((left_width + padding) as u16);
     for (index, (label, style)) in button_labels.into_iter().enumerate() {
         let width = label.chars().count() as u16;
         let rect = Rect {
@@ -180,10 +178,7 @@ fn draw_menu(frame: &mut Frame, area: Rect, app: &mut App) {
         button_x = button_x.saturating_add(width);
     }
 
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(base),
-        area,
-    );
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(base), area);
 }
 
 fn draw_menu_dropdown(frame: &mut Frame, app: &mut App) {
@@ -405,10 +400,7 @@ fn draw_editor(frame: &mut Frame, area: Rect, app: &mut App) {
                 file_row + 1,
                 width = line_number_width as usize
             );
-            spans.push(Span::styled(
-                number,
-                editor_gutter_style(marker, paused),
-            ));
+            spans.push(Span::styled(number, editor_gutter_style(marker, paused)));
 
             spans.extend(render_editor_line(
                 line,
@@ -522,7 +514,8 @@ fn draw_completion_popup(frame: &mut Frame, app: &App) {
         .iter()
         .map(|item| {
             let detail = item.detail.as_deref().unwrap_or_default();
-            item.label.chars().count() + usize::from(!detail.is_empty()) * (detail.chars().count() + 3)
+            item.label.chars().count()
+                + usize::from(!detail.is_empty()) * (detail.chars().count() + 3)
         })
         .max()
         .unwrap_or(12)
@@ -532,10 +525,16 @@ fn draw_completion_popup(frame: &mut Frame, app: &App) {
     let cursor_x = inner
         .x
         .saturating_add(app.editor_gutter_width())
-        .saturating_add(app.editor.cursor_col().saturating_sub(app.editor.col_offset()) as u16);
-    let cursor_y = inner
-        .y
-        .saturating_add(app.editor.cursor_row().saturating_sub(app.editor.row_offset()) as u16);
+        .saturating_add(
+            app.editor
+                .cursor_col()
+                .saturating_sub(app.editor.col_offset()) as u16,
+        );
+    let cursor_y = inner.y.saturating_add(
+        app.editor
+            .cursor_row()
+            .saturating_sub(app.editor.row_offset()) as u16,
+    );
     let max_x = inner.x.saturating_add(inner.width.saturating_sub(width));
     let max_y = inner.y.saturating_add(inner.height.saturating_sub(height));
     let area = Rect {
@@ -558,10 +557,11 @@ fn draw_completion_popup(frame: &mut Frame, app: &App) {
     let items = popup
         .items
         .iter()
+        .skip(popup.scroll)
         .take(inner.height as usize)
         .enumerate()
         .map(|(index, item)| {
-            let active = index == popup.selected;
+            let active = popup.scroll + index == popup.selected;
             let style = if active {
                 Style::default()
                     .fg(DOS_WHITE)
@@ -574,7 +574,13 @@ fn draw_completion_popup(frame: &mut Frame, app: &App) {
             let detail_text = if detail.is_empty() {
                 String::new()
             } else {
-                format!(" - {}", truncate(detail, inner.width.saturating_sub(item.label.len() as u16 + 3)))
+                format!(
+                    " - {}",
+                    truncate(
+                        detail,
+                        inner.width.saturating_sub(item.label.len() as u16 + 3)
+                    )
+                )
             };
             Line::from(Span::styled(
                 truncate(&format!("{}{}", item.label, detail_text), inner.width),
@@ -614,7 +620,10 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         ""
     };
     let debug = if app.debug_active() { "  Debug" } else { "" };
-    let suffix = format!("  {position}{selection}{completion}{debug}  {} ", app.status);
+    let suffix = format!(
+        "  {position}{selection}{completion}{debug}  {} ",
+        app.status
+    );
     let mut line = Line::from(vec![
         Span::styled(" ", base),
         Span::styled("F1", key),
@@ -1012,10 +1021,7 @@ fn highlight_rust(line: &str, paused: bool) -> Vec<Span<'static>> {
                 spans.push(classify_token(&current, paused));
                 current.clear();
             }
-            spans.push(Span::styled(
-                "\"",
-                syntax_style(DOS_YELLOW, paused),
-            ));
+            spans.push(Span::styled("\"", syntax_style(DOS_YELLOW, paused)));
             in_string = !in_string;
         } else if in_string {
             spans.push(Span::styled(
@@ -1061,7 +1067,11 @@ fn syntax_style(fg: Color, paused: bool) -> Style {
 }
 
 fn editor_gutter_style(breakpoint: bool, paused: bool) -> Style {
-    let fg = if breakpoint { DOS_BRIGHT_RED } else { DOS_YELLOW };
+    let fg = if breakpoint {
+        DOS_BRIGHT_RED
+    } else {
+        DOS_YELLOW
+    };
     Style::default()
         .fg(fg)
         .bg(if paused { DOS_RED } else { DOS_BLUE })
