@@ -5,6 +5,8 @@ use std::{
 
 use crate::app::read_to_string;
 
+const INDENT: &str = "    ";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Position {
     pub row: usize,
@@ -293,7 +295,10 @@ impl Editor {
     }
 
     pub fn insert_char(&mut self, character: char) {
-        self.delete_selection();
+        let replaced_selection = self.delete_selection();
+        if !replaced_selection && is_closing_delimiter(character) {
+            self.outdent_current_line_once();
+        }
         let cursor_col = self.cursor_col;
         let byte_idx = char_to_byte(&self.lines[self.cursor_row], cursor_col);
         self.lines[self.cursor_row].insert(byte_idx, character);
@@ -340,10 +345,27 @@ impl Editor {
         self.delete_selection();
         let cursor_col = self.cursor_col;
         let byte_idx = char_to_byte(&self.lines[self.cursor_row], cursor_col);
-        let remainder = self.lines[self.cursor_row].split_off(byte_idx);
+        let current = self.lines[self.cursor_row].clone();
+        let before = current[..byte_idx].to_string();
+        let after = current[byte_idx..].to_string();
+        let base_indent = leading_indent(&before);
+        let line_indent = newline_indent(&before);
+
+        self.lines[self.cursor_row] = before.clone();
         self.cursor_row += 1;
-        self.cursor_col = 0;
-        self.lines.insert(self.cursor_row, remainder);
+        self.cursor_col = line_indent.chars().count();
+
+        if closes_opening_delimiter(&before, &after) {
+            self.lines.insert(self.cursor_row, line_indent);
+            self.lines.insert(
+                self.cursor_row + 1,
+                format!("{base_indent}{}", after.trim_start()),
+            );
+        } else {
+            self.lines
+                .insert(self.cursor_row, format!("{line_indent}{after}"));
+        }
+
         self.dirty = true;
         self.keep_cursor_visible();
     }
@@ -601,6 +623,25 @@ impl Editor {
         self.cursor_col = self.cursor_col.min(self.line_len(self.cursor_row));
     }
 
+    fn outdent_current_line_once(&mut self) {
+        let line = &mut self.lines[self.cursor_row];
+        let before_cursor = slice_chars(line, 0, self.cursor_col);
+        if !before_cursor.chars().all(char::is_whitespace) {
+            return;
+        }
+
+        let remove_cols = outdent_width(&before_cursor);
+        if remove_cols == 0 {
+            return;
+        }
+
+        let start_col = self.cursor_col - remove_cols;
+        let start_byte = char_to_byte(line, start_col);
+        let end_byte = char_to_byte(line, self.cursor_col);
+        line.replace_range(start_byte..end_byte, "");
+        self.cursor_col = start_col;
+    }
+
     fn line_len(&self, row: usize) -> usize {
         self.lines
             .get(row)
@@ -624,6 +665,59 @@ fn char_to_byte(text: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(idx, _)| idx)
         .unwrap_or(text.len())
+}
+
+fn leading_indent(text: &str) -> String {
+    text.chars()
+        .take_while(|character| matches!(character, ' ' | '\t'))
+        .collect()
+}
+
+fn newline_indent(before_cursor: &str) -> String {
+    let mut indent = leading_indent(before_cursor);
+    if increases_indent(before_cursor) {
+        indent.push_str(INDENT);
+    }
+    indent
+}
+
+fn increases_indent(before_cursor: &str) -> bool {
+    let trimmed = before_cursor.trim_end();
+    trimmed.ends_with('{')
+        || trimmed.ends_with('(')
+        || trimmed.ends_with('[')
+        || trimmed.ends_with("=>")
+}
+
+fn closes_opening_delimiter(before_cursor: &str, after_cursor: &str) -> bool {
+    let Some(opening) = before_cursor.trim_end().chars().last() else {
+        return false;
+    };
+    let expected = match opening {
+        '{' => '}',
+        '(' => ')',
+        '[' => ']',
+        _ => return false,
+    };
+
+    after_cursor.trim_start().starts_with(expected)
+}
+
+fn is_closing_delimiter(character: char) -> bool {
+    matches!(character, '}' | ')' | ']')
+}
+
+fn outdent_width(before_cursor: &str) -> usize {
+    if before_cursor.ends_with('\t') {
+        return 1;
+    }
+
+    before_cursor
+        .chars()
+        .rev()
+        .take(INDENT.chars().count())
+        .take_while(|character| *character == ' ')
+        .count()
 }
 
 fn is_identifier_char(character: char) -> bool {
@@ -704,5 +798,66 @@ mod tests {
         );
         assert_eq!(editor.cursor_row(), 2);
         assert_eq!(editor.cursor_col(), 1);
+    }
+
+    #[test]
+    fn newline_carries_current_indent() {
+        let mut editor = Editor::scratch();
+        editor.insert_text("    let value = 1;");
+
+        editor.insert_newline();
+
+        assert_eq!(
+            editor.lines(),
+            &["    let value = 1;".to_string(), "    ".to_string()]
+        );
+        assert_eq!(editor.cursor_row(), 1);
+        assert_eq!(editor.cursor_col(), 4);
+    }
+
+    #[test]
+    fn newline_indents_after_opening_brace() {
+        let mut editor = Editor::scratch();
+        editor.insert_text("fn main() {");
+
+        editor.insert_newline();
+
+        assert_eq!(
+            editor.lines(),
+            &["fn main() {".to_string(), "    ".to_string()]
+        );
+        assert_eq!(editor.cursor_row(), 1);
+        assert_eq!(editor.cursor_col(), 4);
+    }
+
+    #[test]
+    fn newline_between_matching_braces_creates_inner_line() {
+        let mut editor = Editor::scratch();
+        editor.insert_text("    if ready {}");
+        editor.set_cursor(0, 14);
+
+        editor.insert_newline();
+
+        assert_eq!(
+            editor.lines(),
+            &[
+                "    if ready {".to_string(),
+                "        ".to_string(),
+                "    }".to_string(),
+            ]
+        );
+        assert_eq!(editor.cursor_row(), 1);
+        assert_eq!(editor.cursor_col(), 8);
+    }
+
+    #[test]
+    fn closing_brace_dedents_indented_blank_line() {
+        let mut editor = Editor::scratch();
+        editor.insert_text("        ");
+
+        editor.insert_char('}');
+
+        assert_eq!(editor.lines(), &["    }".to_string()]);
+        assert_eq!(editor.cursor_col(), 5);
     }
 }
