@@ -403,7 +403,7 @@ impl App {
     }
 
     #[cfg(test)]
-    fn new_for_tests(root: PathBuf) -> Self {
+    pub(crate) fn new_for_tests(root: PathBuf) -> Self {
         Self::with_completion_engine(root, CompletionEngine::disabled_for_tests())
     }
 
@@ -1533,23 +1533,27 @@ impl App {
     }
 
     fn handle_editor_key(&mut self, key: KeyEvent) {
-        if self.handle_completion_popup_key(key) {
+        if !is_selection_navigation_key(key) && self.handle_completion_popup_key(key) {
             return;
         }
 
         if key.modifiers.contains(KeyModifiers::ALT) {
-            match key.code {
+            let handled = match key.code {
                 KeyCode::Char('x') | KeyCode::Char('X') => {
                     self.editor.delete_line();
-                    self.close_completion();
+                    true
                 }
                 KeyCode::Char('u') | KeyCode::Char('U') => {
                     self.editor.duplicate_line();
-                    self.close_completion();
+                    true
                 }
-                _ => {}
+                _ => false,
+            };
+
+            if handled {
+                self.close_completion();
+                return;
             }
-            return;
         }
 
         let selecting = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -1628,6 +1632,18 @@ impl App {
             }
             KeyCode::Enter => {
                 self.editor.insert_newline();
+                self.close_completion();
+            }
+            KeyCode::BackTab => {
+                self.editor.unindent();
+                self.close_completion();
+            }
+            KeyCode::Tab if selecting => {
+                self.editor.unindent();
+                self.close_completion();
+            }
+            KeyCode::Tab => {
+                self.editor.indent();
                 self.close_completion();
             }
             KeyCode::Char(character) => {
@@ -1955,6 +1971,21 @@ fn contains_y(area: Rect, row: u16) -> bool {
     row >= area.y && row < area.y.saturating_add(area.height)
 }
 
+fn is_selection_navigation_key(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::SHIFT)
+        && matches!(
+            key.code,
+            KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+        )
+}
+
 fn first_selectable_item(menu_index: usize) -> usize {
     MENUS[menu_index]
         .items
@@ -2093,6 +2124,129 @@ mod tests {
 
         assert_eq!(app.editor.path(), Some(first.as_path()));
         assert_eq!(app.editor.cursor_row(), 0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn editor_tab_indents_without_changing_focus() {
+        let root = temp_project("editor-tab");
+        let mut app = App::new_for_tests(root.clone());
+        app.dialog = None;
+        app.focus = Focus::Editor;
+        app.editor.insert_text("letvalue");
+        app.editor.set_cursor(0, 3);
+
+        app.handle_active_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert_eq!(app.focus, Focus::Editor);
+        assert_eq!(app.editor.lines(), &["let    value".to_string()]);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn editor_backtab_unindents() {
+        let root = temp_project("editor-backtab");
+        let mut app = App::new_for_tests(root.clone());
+        app.dialog = None;
+        app.focus = Focus::Editor;
+        app.editor.insert_text("    let value");
+        app.editor.set_cursor(0, 9);
+
+        app.handle_active_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+
+        assert_eq!(app.editor.lines(), &["let value".to_string()]);
+        assert_eq!(app.editor.cursor_col(), 5);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shift_arrow_selects_text_in_editor() {
+        let root = temp_project("shift-arrow-selects");
+        for (code, row, col, expected) in [
+            (KeyCode::Left, 1, 1, "d"),
+            (KeyCode::Right, 1, 1, "e"),
+            (KeyCode::Up, 1, 1, "bc\nd"),
+            (KeyCode::Down, 1, 1, "ef\ng"),
+            (KeyCode::Home, 1, 2, "de"),
+            (KeyCode::End, 1, 1, "ef"),
+        ] {
+            let mut app = App::new_for_tests(root.clone());
+            app.dialog = None;
+            app.focus = Focus::Editor;
+            app.editor.insert_text("abc\ndef\nghi");
+            app.editor.set_cursor(row, col);
+
+            app.handle_active_key(KeyEvent::new(code, KeyModifiers::SHIFT));
+
+            assert_eq!(app.editor.selected_text().as_deref(), Some(expected));
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shift_navigation_selects_text_when_terminal_adds_alt_modifier() {
+        let root = temp_project("shift-alt-navigation-selects");
+        for (code, row, col, expected) in [
+            (KeyCode::Left, 1, 1, "d"),
+            (KeyCode::Right, 1, 1, "e"),
+            (KeyCode::Up, 1, 1, "bc\nd"),
+            (KeyCode::Down, 1, 1, "ef\ng"),
+            (KeyCode::Home, 1, 2, "de"),
+            (KeyCode::End, 1, 1, "ef"),
+        ] {
+            let mut app = App::new_for_tests(root.clone());
+            app.dialog = None;
+            app.focus = Focus::Editor;
+            app.editor.insert_text("abc\ndef\nghi");
+            app.editor.set_cursor(row, col);
+
+            app.handle_active_key(KeyEvent::new(code, KeyModifiers::SHIFT | KeyModifiers::ALT));
+
+            assert_eq!(app.editor.selected_text().as_deref(), Some(expected));
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shift_up_down_select_even_when_completion_popup_is_visible() {
+        let root = temp_project("shift-up-down-completion");
+        for (code, expected) in [(KeyCode::Up, "bc\nd"), (KeyCode::Down, "ef\ng")] {
+            let mut app = App::new_for_tests(root.clone());
+            app.dialog = None;
+            app.focus = Focus::Editor;
+            app.editor.insert_text("abc\ndef\nghi");
+            app.editor.set_cursor(1, 1);
+            app.completion_popup = Some(CompletionPopup {
+                items: vec![
+                    CompletionCandidate {
+                        label: "one".to_string(),
+                        insert_text: "one".to_string(),
+                        detail: None,
+                        kind: CompletionKind::Keyword,
+                    },
+                    CompletionCandidate {
+                        label: "two".to_string(),
+                        insert_text: "two".to_string(),
+                        detail: None,
+                        kind: CompletionKind::Keyword,
+                    },
+                ],
+                selected: 1,
+                scroll: 0,
+                replace_start: 0,
+                replace_end: 0,
+            });
+
+            app.handle_active_key(KeyEvent::new(code, KeyModifiers::SHIFT));
+
+            assert_eq!(app.editor.selected_text().as_deref(), Some(expected));
+            assert!(!app.completion_visible());
+        }
 
         let _ = fs::remove_dir_all(root);
     }

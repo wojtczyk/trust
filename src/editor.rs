@@ -474,6 +474,45 @@ impl Editor {
         self.finish_edit();
     }
 
+    pub fn indent(&mut self) {
+        let Some((start_row, end_row)) = self.selected_line_range() else {
+            self.insert_text(INDENT);
+            return;
+        };
+
+        self.begin_edit();
+        for row in start_row..=end_row {
+            self.lines[row].insert_str(0, INDENT);
+        }
+        self.adjust_positions_for_indent(start_row, end_row);
+        self.finish_edit();
+    }
+
+    pub fn unindent(&mut self) {
+        let (start_row, end_row) = self
+            .selected_line_range()
+            .unwrap_or((self.cursor_row, self.cursor_row));
+        let removals = (start_row..=end_row)
+            .map(|row| line_outdent_width(&self.lines[row]))
+            .collect::<Vec<_>>();
+
+        if removals.iter().all(|width| *width == 0) {
+            return;
+        }
+
+        self.begin_edit();
+        for (offset, width) in removals.iter().copied().enumerate() {
+            if width == 0 {
+                continue;
+            }
+            let line = &mut self.lines[start_row + offset];
+            let end_byte = char_to_byte(line, width);
+            line.replace_range(0..end_byte, "");
+        }
+        self.adjust_positions_for_unindent(start_row, &removals);
+        self.finish_edit();
+    }
+
     pub fn undo(&mut self) -> bool {
         let Some(snapshot) = self.undo_stack.pop() else {
             return false;
@@ -636,6 +675,16 @@ impl Editor {
         }
     }
 
+    fn selected_line_range(&self) -> Option<(usize, usize)> {
+        let (start, end) = self.selection_bounds()?;
+        let end_row = if end.col == 0 && end.row > start.row {
+            end.row - 1
+        } else {
+            end.row
+        };
+        Some((start.row, end_row))
+    }
+
     fn delete_selection_without_history(&mut self) -> bool {
         let Some((start, end)) = self.selection_bounds() else {
             return false;
@@ -726,6 +775,22 @@ impl Editor {
 
     fn sync_dirty_flag(&mut self) {
         self.dirty = self.revision != self.clean_revision;
+    }
+
+    fn adjust_positions_for_indent(&mut self, start_row: usize, end_row: usize) {
+        self.cursor_col =
+            adjust_col_for_indent(self.cursor_row, self.cursor_col, start_row, end_row);
+        if let Some(anchor) = self.selection_anchor.as_mut() {
+            anchor.col = adjust_col_for_indent(anchor.row, anchor.col, start_row, end_row);
+        }
+    }
+
+    fn adjust_positions_for_unindent(&mut self, start_row: usize, removals: &[usize]) {
+        self.cursor_col =
+            adjust_col_for_unindent(self.cursor_row, self.cursor_col, start_row, removals);
+        if let Some(anchor) = self.selection_anchor.as_mut() {
+            anchor.col = adjust_col_for_unindent(anchor.row, anchor.col, start_row, removals);
+        }
     }
 
     fn clear_selection(&mut self) {
@@ -855,6 +920,35 @@ fn outdent_width(before_cursor: &str) -> usize {
         .count()
 }
 
+fn line_outdent_width(line: &str) -> usize {
+    if line.starts_with('\t') {
+        return 1;
+    }
+
+    line.chars()
+        .take(INDENT.chars().count())
+        .take_while(|character| *character == ' ')
+        .count()
+}
+
+fn adjust_col_for_indent(row: usize, col: usize, start_row: usize, end_row: usize) -> usize {
+    if (start_row..=end_row).contains(&row) {
+        col + INDENT.chars().count()
+    } else {
+        col
+    }
+}
+
+fn adjust_col_for_unindent(row: usize, col: usize, start_row: usize, removals: &[usize]) -> usize {
+    let Some(offset) = row.checked_sub(start_row) else {
+        return col;
+    };
+    let Some(width) = removals.get(offset).copied() else {
+        return col;
+    };
+    col.saturating_sub(width.min(col))
+}
+
 fn is_identifier_char(character: char) -> bool {
     character.is_alphanumeric() || character == '_'
 }
@@ -892,6 +986,68 @@ mod tests {
 
         assert_eq!(editor.lines(), &["hello rust".to_string()]);
         assert!(!editor.has_selection());
+    }
+
+    #[test]
+    fn tab_inserts_indent_at_cursor_without_selection() {
+        let mut editor = Editor::scratch();
+        editor.insert_text("letvalue");
+        editor.set_cursor(0, 3);
+
+        editor.indent();
+
+        assert_eq!(editor.lines(), &["let    value".to_string()]);
+        assert_eq!(editor.cursor_col(), 7);
+    }
+
+    #[test]
+    fn tab_indents_selected_lines() {
+        let mut editor = Editor::scratch();
+        editor.insert_text("one\ntwo\nthree");
+        editor.set_cursor(0, 1);
+        editor.begin_selection();
+        editor.select_to(1, 2);
+
+        editor.indent();
+
+        assert_eq!(
+            editor.lines(),
+            &[
+                "    one".to_string(),
+                "    two".to_string(),
+                "three".to_string(),
+            ]
+        );
+        assert_eq!(editor.selected_text().as_deref(), Some("ne\n    tw"));
+    }
+
+    #[test]
+    fn backtab_unindents_current_line() {
+        let mut editor = Editor::scratch();
+        editor.insert_text("    let value");
+        editor.set_cursor(0, 9);
+
+        editor.unindent();
+
+        assert_eq!(editor.lines(), &["let value".to_string()]);
+        assert_eq!(editor.cursor_col(), 5);
+    }
+
+    #[test]
+    fn backtab_unindents_selected_lines() {
+        let mut editor = Editor::scratch();
+        editor.insert_text("    one\n  two\n\tthree");
+        editor.set_cursor(0, 4);
+        editor.begin_selection();
+        editor.select_to(2, 6);
+
+        editor.unindent();
+
+        assert_eq!(
+            editor.lines(),
+            &["one".to_string(), "two".to_string(), "three".to_string()]
+        );
+        assert_eq!(editor.selected_text().as_deref(), Some("one\ntwo\nthree"));
     }
 
     #[test]
