@@ -84,7 +84,7 @@ fn print_usage() {
     println!("  trust [PROJECT_PATH]");
     println!();
     println!(
-        "Keys: F1 Help, F2 Save, F3 Open, F5 Run, F6 Breakpoint, Ctrl+D Debug, F11/F12 Step, Ctrl+Space Complete, Ctrl+Q Quit"
+        "Keys: F1 Help, F2 Save, F3 Open, F5 Run, F6 Breakpoint, Ctrl+D Debug, F11/F12 Step, Ctrl+Space Complete, Ctrl+Z Undo, Ctrl+Y Redo, Ctrl+Q Quit"
     );
 }
 
@@ -159,10 +159,19 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
     }
 
     if key.modifiers.contains(KeyModifiers::CONTROL) {
+        if key.modifiers.contains(KeyModifiers::SHIFT)
+            && matches!(key.code, KeyCode::Char('z') | KeyCode::Char('Z'))
+        {
+            app.redo_editor();
+            return Action::None;
+        }
+
         match key.code {
             KeyCode::Char('c') | KeyCode::Char('C') => app.copy_selection(),
             KeyCode::Char('x') | KeyCode::Char('X') => app.cut_selection(),
             KeyCode::Char('v') | KeyCode::Char('V') => app.paste_from_clipboard(),
+            KeyCode::Char('z') | KeyCode::Char('Z') => app.undo_editor(),
+            KeyCode::Char('y') | KeyCode::Char('Y') => app.redo_editor(),
             KeyCode::Char('s') | KeyCode::Char('S') => {
                 app.save_current();
             }

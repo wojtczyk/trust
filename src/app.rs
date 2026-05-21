@@ -30,6 +30,9 @@ pub const MENUS: [Menu; 9] = [
     Menu {
         title: "Edit",
         items: &[
+            MenuItem::action("Undo", "Ctrl+Z", MenuAction::Undo),
+            MenuItem::action("Redo", "Ctrl+Y", MenuAction::Redo),
+            MenuItem::separator(),
             MenuItem::action("Copy", "Ctrl+C", MenuAction::Copy),
             MenuItem::action("Cut", "Ctrl+X", MenuAction::Cut),
             MenuItem::action("Paste", "Ctrl+V", MenuAction::Paste),
@@ -140,6 +143,8 @@ pub enum MenuAction {
     OpenManifest,
     Save,
     Quit,
+    Undo,
+    Redo,
     Copy,
     Cut,
     Paste,
@@ -1217,6 +1222,8 @@ impl App {
                 self.save_current();
             }
             MenuAction::Quit => return Action::Quit,
+            MenuAction::Undo => self.undo_editor(),
+            MenuAction::Redo => self.redo_editor(),
             MenuAction::Copy => self.copy_selection(),
             MenuAction::Cut => self.cut_selection(),
             MenuAction::Paste => self.paste_from_clipboard(),
@@ -1274,6 +1281,38 @@ impl App {
                 self.status = format!("Cut {} characters", text.chars().count());
             }
             Err(error) => self.status = format!("Cut failed: {error}"),
+        }
+    }
+
+    pub fn undo_editor(&mut self) {
+        self.close_menu();
+        self.dialog = None;
+        self.help_open = false;
+        self.focus = Focus::Editor;
+        if self.editor.undo() {
+            self.status = if self.editor.can_undo() {
+                "Undo".to_string()
+            } else {
+                "Undo reached the oldest change".to_string()
+            };
+        } else {
+            self.status = "Nothing to undo".to_string();
+        }
+    }
+
+    pub fn redo_editor(&mut self) {
+        self.close_menu();
+        self.dialog = None;
+        self.help_open = false;
+        self.focus = Focus::Editor;
+        if self.editor.redo() {
+            self.status = if self.editor.can_redo() {
+                "Redo".to_string()
+            } else {
+                "Redo reached the newest change".to_string()
+            };
+        } else {
+            self.status = "Nothing to redo".to_string();
         }
     }
 
