@@ -52,6 +52,7 @@ pub struct Editor {
     redo_stack: Vec<EditorSnapshot>,
     revision: usize,
     clean_revision: usize,
+    next_revision: usize,
 }
 
 impl Editor {
@@ -71,6 +72,7 @@ impl Editor {
             redo_stack: Vec::new(),
             revision: 0,
             clean_revision: 0,
+            next_revision: 1,
         }
     }
 
@@ -96,6 +98,7 @@ impl Editor {
             redo_stack: Vec::new(),
             revision: 0,
             clean_revision: 0,
+            next_revision: 1,
         })
     }
 
@@ -701,6 +704,7 @@ impl Editor {
         self.col_offset = snapshot.col_offset;
         self.selection_anchor = snapshot.selection_anchor;
         self.revision = snapshot.revision;
+        self.next_revision = self.next_revision.max(self.revision + 1);
         self.sync_dirty_flag();
         self.keep_cursor_visible();
     }
@@ -714,7 +718,8 @@ impl Editor {
     }
 
     fn finish_edit(&mut self) {
-        self.revision += 1;
+        self.revision = self.next_revision;
+        self.next_revision += 1;
         self.sync_dirty_flag();
         self.keep_cursor_visible();
     }
@@ -856,7 +861,10 @@ fn is_identifier_char(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, time::{SystemTime, UNIX_EPOCH}};
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use super::Editor;
 
@@ -933,6 +941,27 @@ mod tests {
         assert!(editor.undo());
         assert_eq!(editor.lines(), &["betaalpha".to_string(), "".to_string()]);
         assert!(!editor.is_dirty());
+
+        fs::remove_file(path).expect("remove temp file");
+    }
+
+    #[test]
+    fn edit_after_undoing_from_saved_state_stays_dirty() {
+        let path = temp_file_path("trust_undo_dirty");
+        fs::write(&path, "").expect("write temp file");
+
+        let mut editor = Editor::open(&path).expect("open temp file");
+        editor.insert_text("a");
+        editor.insert_text("b");
+        editor.save().expect("save editor");
+        assert!(!editor.is_dirty());
+
+        assert!(editor.undo());
+        assert!(editor.is_dirty());
+        editor.insert_text("c");
+
+        assert_eq!(editor.lines(), &["ac".to_string()]);
+        assert!(editor.is_dirty());
 
         fs::remove_file(path).expect("remove temp file");
     }
