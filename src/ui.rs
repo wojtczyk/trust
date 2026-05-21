@@ -700,6 +700,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::from("Ctrl+Z Undo Ctrl+Y Redo Ctrl+C Copy Ctrl+Q Quit"),
         Line::from("Ctrl+X Cut  Ctrl+V Paste Ctrl+S Save Ctrl+F Focus"),
         Line::from("Ctrl+Space Complete"),
+        Line::from("Tab Indent  Shift+Tab Unindent"),
         Line::from("Alt+U Duplicate line   Alt+X Delete line"),
         Line::from("Shift+Arrows/Home/End/Page selects text"),
         Line::from("Menu: F10 opens, arrows move, Enter activates."),

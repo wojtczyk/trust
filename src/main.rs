@@ -18,7 +18,8 @@ use app::{Action, App};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyModifiers,
+        Event, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -94,6 +95,11 @@ fn setup_terminal() -> io::Result<TerminalUi> {
     execute!(
         stdout,
         EnterAlternateScreen,
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
+        ),
         EnableMouseCapture,
         EnableBracketedPaste
     )?;
@@ -106,6 +112,7 @@ fn restore_terminal(terminal: &mut TerminalUi) -> io::Result<()> {
         terminal.backend_mut(),
         DisableBracketedPaste,
         DisableMouseCapture,
+        PopKeyboardEnhancementFlags,
         LeaveAlternateScreen
     )?;
     terminal.show_cursor()
@@ -156,6 +163,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
 
     if app.menu_open {
         return app.handle_menu_key(key);
+    }
+
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.modifiers.contains(KeyModifiers::SHIFT)
+        && is_navigation_key(key.code)
+    {
+        app.handle_active_key(key);
+        return Action::None;
     }
 
     if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -211,10 +226,130 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         KeyCode::F(11) if key.modifiers.contains(KeyModifiers::SHIFT) => app.debug_step_out(),
         KeyCode::F(11) => app.debug_step_into(),
         KeyCode::F(12) => app.debug_step_over(),
-        KeyCode::Tab => app.toggle_focus(),
-        KeyCode::BackTab => app.toggle_focus(),
         _ => app.handle_active_key(key),
     }
 
     Action::None
+}
+
+fn is_navigation_key(code: KeyCode) -> bool {
+    matches!(
+        code,
+        KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::handle_key;
+    use crate::app::{Action, App, Focus};
+
+    #[test]
+    fn tab_in_editor_indents_instead_of_cycling_focus() {
+        let root = temp_project("main-tab");
+        let mut app = App::new_for_tests(root.clone());
+        app.dialog = None;
+        app.focus = Focus::Editor;
+        app.editor.insert_text("letvalue");
+        app.editor.set_cursor(0, 3);
+
+        assert_eq!(
+            handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Action::None
+        );
+
+        assert_eq!(app.focus, Focus::Editor);
+        assert_eq!(app.editor.lines(), &["let    value".to_string()]);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn control_shift_navigation_reaches_editor_selection() {
+        let root = temp_project("main-shift-arrow");
+        for (code, row, col, expected) in [
+            (KeyCode::Left, 1, 1, "d"),
+            (KeyCode::Right, 1, 1, "e"),
+            (KeyCode::Up, 1, 1, "bc\nd"),
+            (KeyCode::Down, 1, 1, "ef\ng"),
+            (KeyCode::Home, 1, 2, "de"),
+            (KeyCode::End, 1, 1, "ef"),
+        ] {
+            let mut app = App::new_for_tests(root.clone());
+            app.dialog = None;
+            app.focus = Focus::Editor;
+            app.editor.insert_text("abc\ndef\nghi");
+            app.editor.set_cursor(row, col);
+
+            assert_eq!(
+                handle_key(
+                    &mut app,
+                    KeyEvent::new(code, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+                ),
+                Action::None
+            );
+
+            assert_eq!(app.editor.selected_text().as_deref(), Some(expected));
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn plain_shift_navigation_reaches_editor_selection() {
+        let root = temp_project("main-plain-shift-arrow");
+        for (code, row, col, expected) in [
+            (KeyCode::Left, 1, 1, "d"),
+            (KeyCode::Right, 1, 1, "e"),
+            (KeyCode::Up, 1, 1, "bc\nd"),
+            (KeyCode::Down, 1, 1, "ef\ng"),
+            (KeyCode::Home, 1, 2, "de"),
+            (KeyCode::End, 1, 1, "ef"),
+        ] {
+            let mut app = App::new_for_tests(root.clone());
+            app.dialog = None;
+            app.focus = Focus::Editor;
+            app.editor.insert_text("abc\ndef\nghi");
+            app.editor.set_cursor(row, col);
+
+            assert_eq!(
+                handle_key(&mut app, KeyEvent::new(code, KeyModifiers::SHIFT)),
+                Action::None
+            );
+
+            assert_eq!(app.editor.selected_text().as_deref(), Some(expected));
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn temp_project(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("trust-{name}-{unique}"));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"trust_test\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        root
+    }
 }

@@ -53,7 +53,7 @@ If no path is supplied, TRUST opens the current directory.
 - `F2` / `Ctrl+S`: save
 - `F3` / `Ctrl+O`: open selected file
 - `Backspace`: go to the parent directory in the project pane
-- `F4` / `Tab` / `Ctrl+F`: cycle focus
+- `F4` / `Ctrl+F`: cycle focus
 - `F5` / `Ctrl+R`: `cargo run`
 - `F6`: toggle breakpoint on the current line
 - `F7`: `cargo check`
@@ -74,6 +74,8 @@ If no path is supplied, TRUST opens the current directory.
 - `Esc` / `Ctrl+Q`: quit
 - `Alt+X`: delete line
 - `Alt+U`: duplicate line
+- `Tab`: indent
+- `Shift+Tab`: unindent
 - `Shift+Navigation`: select text
 - In the editor, `Enter` inserts an auto-indented new line.
 
