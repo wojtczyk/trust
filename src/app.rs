@@ -1538,18 +1538,22 @@ impl App {
         }
 
         if key.modifiers.contains(KeyModifiers::ALT) {
-            match key.code {
+            let handled = match key.code {
                 KeyCode::Char('x') | KeyCode::Char('X') => {
                     self.editor.delete_line();
-                    self.close_completion();
+                    true
                 }
                 KeyCode::Char('u') | KeyCode::Char('U') => {
                     self.editor.duplicate_line();
-                    self.close_completion();
+                    true
                 }
-                _ => {}
+                _ => false,
+            };
+
+            if handled {
+                self.close_completion();
+                return;
             }
-            return;
         }
 
         let selecting = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -2176,6 +2180,31 @@ mod tests {
             app.editor.set_cursor(row, col);
 
             app.handle_active_key(KeyEvent::new(code, KeyModifiers::SHIFT));
+
+            assert_eq!(app.editor.selected_text().as_deref(), Some(expected));
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shift_navigation_selects_text_when_terminal_adds_alt_modifier() {
+        let root = temp_project("shift-alt-navigation-selects");
+        for (code, row, col, expected) in [
+            (KeyCode::Left, 1, 1, "d"),
+            (KeyCode::Right, 1, 1, "e"),
+            (KeyCode::Up, 1, 1, "bc\nd"),
+            (KeyCode::Down, 1, 1, "ef\ng"),
+            (KeyCode::Home, 1, 2, "de"),
+            (KeyCode::End, 1, 1, "ef"),
+        ] {
+            let mut app = App::new_for_tests(root.clone());
+            app.dialog = None;
+            app.focus = Focus::Editor;
+            app.editor.insert_text("abc\ndef\nghi");
+            app.editor.set_cursor(row, col);
+
+            app.handle_active_key(KeyEvent::new(code, KeyModifiers::SHIFT | KeyModifiers::ALT));
 
             assert_eq!(app.editor.selected_text().as_deref(), Some(expected));
         }

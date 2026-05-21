@@ -9,6 +9,7 @@ mod ui;
 use std::{
     env,
     ffi::OsString,
+    fmt,
     io::{self, IsTerminal, Stdout},
     path::PathBuf,
     time::Duration,
@@ -16,6 +17,7 @@ use std::{
 
 use app::{Action, App};
 use crossterm::{
+    Command,
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         Event, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags,
@@ -27,6 +29,32 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 type TerminalUi = Terminal<CrosstermBackend<Stdout>>;
+
+struct EnableXtermModifiedKeys;
+
+impl Command for EnableXtermModifiedKeys {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        write!(f, "\x1b[>1;2m\x1b[>2;2m\x1b[>4;2m")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct ResetXtermModifiedKeys;
+
+impl Command for ResetXtermModifiedKeys {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        write!(f, "\x1b[>1;0m\x1b[>2;0m\x1b[>4;0m")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = match parse_args()? {
@@ -97,9 +125,11 @@ fn setup_terminal() -> io::Result<TerminalUi> {
         EnterAlternateScreen,
         PushKeyboardEnhancementFlags(
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
                 | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
                 | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
         ),
+        EnableXtermModifiedKeys,
         EnableMouseCapture,
         EnableBracketedPaste
     )?;
@@ -113,6 +143,7 @@ fn restore_terminal(terminal: &mut TerminalUi) -> io::Result<()> {
         DisableBracketedPaste,
         DisableMouseCapture,
         PopKeyboardEnhancementFlags,
+        ResetXtermModifiedKeys,
         LeaveAlternateScreen
     )?;
     terminal.show_cursor()
@@ -329,6 +360,37 @@ mod tests {
 
             assert_eq!(
                 handle_key(&mut app, KeyEvent::new(code, KeyModifiers::SHIFT)),
+                Action::None
+            );
+
+            assert_eq!(app.editor.selected_text().as_deref(), Some(expected));
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn alt_shift_navigation_reaches_editor_selection() {
+        let root = temp_project("main-alt-shift-arrow");
+        for (code, row, col, expected) in [
+            (KeyCode::Left, 1, 1, "d"),
+            (KeyCode::Right, 1, 1, "e"),
+            (KeyCode::Up, 1, 1, "bc\nd"),
+            (KeyCode::Down, 1, 1, "ef\ng"),
+            (KeyCode::Home, 1, 2, "de"),
+            (KeyCode::End, 1, 1, "ef"),
+        ] {
+            let mut app = App::new_for_tests(root.clone());
+            app.dialog = None;
+            app.focus = Focus::Editor;
+            app.editor.insert_text("abc\ndef\nghi");
+            app.editor.set_cursor(row, col);
+
+            assert_eq!(
+                handle_key(
+                    &mut app,
+                    KeyEvent::new(code, KeyModifiers::SHIFT | KeyModifiers::ALT),
+                ),
                 Action::None
             );
 
