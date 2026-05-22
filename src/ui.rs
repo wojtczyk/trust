@@ -63,6 +63,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_help(frame, centered(root, 72, 17));
     } else if let Some(dialog) = app.dialog {
         match dialog {
+            Dialog::Find => draw_find_dialog(frame, app, centered(root, 66, 9)),
             Dialog::NewFile => draw_new_file_dialog(frame, app, centered(root, 66, 10)),
             Dialog::NewProject => draw_new_project_dialog(frame, app, centered(root, 74, 16)),
             Dialog::About | Dialog::CompileResult => {
@@ -407,6 +408,7 @@ fn draw_editor(frame: &mut Frame, area: Rect, app: &mut App) {
                 col_offset,
                 text_cols,
                 app.editor.selection_range_for_line(file_row),
+                &app.find_ranges_for_line(file_row),
                 paused,
             ));
         } else {
@@ -620,8 +622,16 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         ""
     };
     let debug = if app.debug_active() { "  Debug" } else { "" };
+    let find = if app.find_active() {
+        app.find
+            .current
+            .map(|index| format!("  Find {}/{}", index + 1, app.find.matches.len()))
+            .unwrap_or_else(|| "  Find 0/0".to_string())
+    } else {
+        String::new()
+    };
     let suffix = format!(
-        "  {position}{selection}{completion}{debug}  {} ",
+        "  {position}{selection}{completion}{debug}{find}  {} ",
         app.status
     );
     let mut line = Line::from(vec![
@@ -699,8 +709,9 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::from("Ctrl+D Debug/Continue  F11 Step Into  F12 Step Over"),
         Line::from("Shift+F11 Step Out     Shift+F5 Stop debug"),
         Line::from("Ctrl+Z Undo Ctrl+Y Redo Ctrl+C Copy Ctrl+Q Quit"),
-        Line::from("Ctrl+X Cut  Ctrl+V Paste Ctrl+S Save Ctrl+F Focus"),
-        Line::from("Ctrl+Space Complete"),
+        Line::from("Ctrl+X Cut  Ctrl+V Paste Ctrl+S Save Ctrl+F Find"),
+        Line::from("Ctrl+G Find next  Shift+F3 Find previous"),
+        Line::from("Ctrl+Space Complete   F4 Cycle focus"),
         Line::from("Tab Indent  Shift+Tab Unindent"),
         Line::from("Alt+U Duplicate line   Alt+X Delete line"),
         Line::from("Shift+Arrows/Home/End/Page selects text"),
@@ -729,6 +740,7 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: Dialog, area: Rect) {
     let title = match dialog {
         Dialog::About => " About TRUST ",
         Dialog::CompileResult => " Cargo Result ",
+        Dialog::Find => " Find ",
         Dialog::NewFile => " New File ",
         Dialog::NewProject => " New Project ",
     };
@@ -765,6 +777,7 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: Dialog, area: Rect) {
             Line::from(""),
             Line::from("Press any key to return."),
         ]),
+        Dialog::Find => Text::from(""),
         Dialog::NewFile => Text::from(""),
         Dialog::NewProject => Text::from(""),
     };
@@ -773,6 +786,51 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: Dialog, area: Rect) {
         Paragraph::new(text)
             .style(Style::default().fg(DOS_BLACK).bg(DOS_GRAY))
             .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
+}
+
+fn draw_find_dialog(frame: &mut Frame, app: &App, area: Rect) {
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(" Find ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(DOS_YELLOW).bg(DOS_CYAN))
+        .style(Style::default().fg(DOS_BLACK).bg(DOS_GRAY));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let query = truncate(
+        &app.find.query.replace('\n', "\\n"),
+        inner.width.saturating_sub(10).max(1),
+    );
+    let summary = truncate(&app.find_summary(), inner.width);
+    let text = Text::from(vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" Find ", Style::default().fg(DOS_BLACK).bg(DOS_GRAY)),
+            Span::styled(
+                format!(" {query} "),
+                Style::default()
+                    .fg(DOS_WHITE)
+                    .bg(DOS_BLUE)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            summary,
+            Style::default().fg(DOS_BLUE).bg(DOS_CYAN),
+        )),
+        Line::from(""),
+        Line::from(" Enter keeps. Esc clears. Down/F3 next. Up/Shift+F3 previous."),
+    ]);
+
+    frame.render_widget(
+        Paragraph::new(text)
+            .style(Style::default().fg(DOS_BLACK).bg(DOS_GRAY))
             .wrap(Wrap { trim: true }),
         inner,
     );
@@ -968,6 +1026,7 @@ fn render_editor_line(
     col_offset: usize,
     text_cols: usize,
     selection: Option<(usize, usize)>,
+    search_ranges: &[crate::app::SearchRange],
     paused: bool,
 ) -> Vec<Span<'static>> {
     let chars = line
@@ -977,43 +1036,91 @@ fn render_editor_line(
         .collect::<Vec<_>>();
     let mut spans = Vec::new();
     let mut run = String::new();
-    let mut run_selected = None;
+    let mut run_style = None;
 
     for (screen_col, character) in chars.into_iter().enumerate() {
         let absolute_col = col_offset + screen_col;
-        let selected = selection
+        let style = if selection
             .map(|(start, end)| absolute_col >= start && absolute_col < end)
-            .unwrap_or(false);
-
-        if run_selected == Some(selected) || run_selected.is_none() {
-            run.push(character);
-            run_selected = Some(selected);
+            .unwrap_or(false)
+        {
+            EditorCellStyle::Selected
+        } else if search_ranges
+            .iter()
+            .any(|range| range.current && absolute_col >= range.start && absolute_col < range.end)
+        {
+            EditorCellStyle::CurrentSearch
+        } else if search_ranges
+            .iter()
+            .any(|range| absolute_col >= range.start && absolute_col < range.end)
+        {
+            EditorCellStyle::Search
         } else {
-            push_editor_run(&mut spans, &run, run_selected.unwrap_or(false), paused);
+            EditorCellStyle::Normal
+        };
+
+        if run_style == Some(style) || run_style.is_none() {
+            run.push(character);
+            run_style = Some(style);
+        } else {
+            push_editor_run(
+                &mut spans,
+                &run,
+                run_style.unwrap_or(EditorCellStyle::Normal),
+                paused,
+            );
             run.clear();
             run.push(character);
-            run_selected = Some(selected);
+            run_style = Some(style);
         }
     }
 
     if !run.is_empty() {
-        push_editor_run(&mut spans, &run, run_selected.unwrap_or(false), paused);
+        push_editor_run(
+            &mut spans,
+            &run,
+            run_style.unwrap_or(EditorCellStyle::Normal),
+            paused,
+        );
     }
 
     spans
 }
 
-fn push_editor_run(spans: &mut Vec<Span<'static>>, run: &str, selected: bool, paused: bool) {
-    if selected {
-        spans.push(Span::styled(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditorCellStyle {
+    Normal,
+    Selected,
+    Search,
+    CurrentSearch,
+}
+
+fn push_editor_run(
+    spans: &mut Vec<Span<'static>>,
+    run: &str,
+    style: EditorCellStyle,
+    paused: bool,
+) {
+    match style {
+        EditorCellStyle::Normal => spans.extend(highlight_rust(run, paused)),
+        EditorCellStyle::Selected => spans.push(Span::styled(
             run.to_string(),
             Style::default()
                 .fg(DOS_BLACK)
                 .bg(DOS_CYAN)
                 .add_modifier(Modifier::BOLD),
-        ));
-    } else {
-        spans.extend(highlight_rust(run, paused));
+        )),
+        EditorCellStyle::Search => spans.push(Span::styled(
+            run.to_string(),
+            Style::default().fg(DOS_BLACK).bg(DOS_YELLOW),
+        )),
+        EditorCellStyle::CurrentSearch => spans.push(Span::styled(
+            run.to_string(),
+            Style::default()
+                .fg(DOS_WHITE)
+                .bg(DOS_RED)
+                .add_modifier(Modifier::BOLD),
+        )),
     }
 }
 

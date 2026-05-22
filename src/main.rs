@@ -166,7 +166,7 @@ fn run(terminal: &mut TerminalUi, app: &mut App) -> io::Result<()> {
                         break;
                     }
                 }
-                Event::Paste(text) => app.paste_text(&text),
+                Event::Paste(text) => app.handle_paste(&text),
                 Event::Resize(_, _) => {}
                 _ => {}
             }
@@ -212,6 +212,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
             return Action::None;
         }
 
+        if key.modifiers.contains(KeyModifiers::SHIFT)
+            && matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G'))
+        {
+            app.find_previous();
+            return Action::None;
+        }
+
         match key.code {
             KeyCode::Char('c') | KeyCode::Char('C') => app.copy_selection(),
             KeyCode::Char('x') | KeyCode::Char('X') => app.cut_selection(),
@@ -221,7 +228,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
             KeyCode::Char('s') | KeyCode::Char('S') => {
                 app.save_current();
             }
-            KeyCode::Char('f') | KeyCode::Char('F') => app.toggle_focus(),
+            KeyCode::Char('f') | KeyCode::Char('F') => app.open_find_dialog(),
+            KeyCode::Char('g') | KeyCode::Char('G') => app.find_next(),
             KeyCode::Char('o') | KeyCode::Char('O') => app.open_selected_file(),
             KeyCode::Char('r') | KeyCode::Char('R') => app.run_cargo("run"),
             KeyCode::Char('t') | KeyCode::Char('T') => app.run_cargo("test"),
@@ -245,6 +253,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         KeyCode::F(2) => {
             app.save_current();
         }
+        KeyCode::F(3) if key.modifiers.contains(KeyModifiers::SHIFT) => app.find_previous(),
+        KeyCode::F(3) if app.find_active() && app.focus == app::Focus::Editor => app.find_next(),
         KeyCode::F(3) => app.open_selected_file(),
         KeyCode::F(4) => app.toggle_focus(),
         KeyCode::F(5) if key.modifiers.contains(KeyModifiers::SHIFT) => app.stop_debug(),
@@ -288,7 +298,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::handle_key;
-    use crate::app::{Action, App, Focus};
+    use crate::app::{Action, App, Dialog, Focus};
 
     #[test]
     fn tab_in_editor_indents_instead_of_cycling_focus() {
@@ -396,6 +406,57 @@ mod tests {
 
             assert_eq!(app.editor.selected_text().as_deref(), Some(expected));
         }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn control_f_opens_find_dialog() {
+        let root = temp_project("main-find-dialog");
+        let mut app = App::new_for_tests(root.clone());
+        app.dialog = None;
+        app.focus = Focus::Editor;
+
+        assert_eq!(
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+            ),
+            Action::None
+        );
+
+        assert_eq!(app.dialog, Some(Dialog::Find));
+        assert_eq!(app.focus, Focus::Editor);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn control_g_routes_to_find_next() {
+        let root = temp_project("main-find-next");
+        let mut app = App::new_for_tests(root.clone());
+        app.dialog = None;
+        app.focus = Focus::Editor;
+        app.editor.insert_text("foo\nbar foo");
+        app.editor.set_cursor(0, 0);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+        );
+        for character in "foo".chars() {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!((app.editor.cursor_row(), app.editor.cursor_col()), (1, 4));
 
         let _ = fs::remove_dir_all(root);
     }

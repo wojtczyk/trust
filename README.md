@@ -10,6 +10,7 @@ and runs Cargo commands.
 
 - Optional `rust-analyzer` powered autocomplete for Rust files, with a built-in
   fallback completion list until the language server is explicitly enabled.
+- In-editor find with live match highlighting and next/previous navigation.
 - Clickable top-bar `Run`, `Debug`, and `BP` controls.
 - Source-level breakpoints in the editor gutter and a basic LLDB-backed debug
   loop with continue and stepping commands.
@@ -60,7 +61,7 @@ If no path is supplied, TRUST opens the current directory.
 - `F2` / `Ctrl+S`: save
 - `F3` / `Ctrl+O`: open selected file
 - `Backspace`: go to the parent directory in the project pane
-- `F4` / `Ctrl+F`: cycle focus
+- `F4`: cycle focus
 - `F5` / `Ctrl+R`: `cargo run`
 - `F6`: toggle breakpoint on the current line
 - `F7`: `cargo check`
@@ -75,6 +76,9 @@ If no path is supplied, TRUST opens the current directory.
 - `Shift+F5`: stop the active debug session
 - `Ctrl+C`: copy selected text
 - `Ctrl+D`: start or continue the debugger
+- `Ctrl+F`: find in the current editor file
+- `Ctrl+G`: find next
+- `Ctrl+Shift+G` / `Shift+F3`: find previous
 - `Ctrl+Space`: request autocomplete suggestions
 - `Ctrl+V`: paste clipboard text
 - `Ctrl+X`: cut selected text
@@ -95,6 +99,7 @@ If no path is supplied, TRUST opens the current directory.
 - `Esc` closes the menu.
 - Mouse clicks on the menu bar and dropdown items work too.
 - `Edit` now includes `Undo` and `Redo`.
+- `Search` contains find, find next, and find previous.
 - `Debug` contains start/continue, breakpoint, step, and stop commands.
 - `File > New` asks for a filename and creates it in the current project pane
   directory.
