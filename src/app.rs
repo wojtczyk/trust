@@ -17,7 +17,7 @@ use crate::{
     project::{ProjectEntry, list_project_dir},
 };
 
-pub const MENUS: [Menu; 9] = [
+pub const MENUS: [Menu; 8] = [
     Menu {
         title: "File",
         items: &[
@@ -38,16 +38,12 @@ pub const MENUS: [Menu; 9] = [
             MenuItem::action("Cut", "Ctrl+X", MenuAction::Cut),
             MenuItem::action("Paste", "Ctrl+V", MenuAction::Paste),
             MenuItem::separator(),
-            MenuItem::action("Delete line", "Alt+X", MenuAction::DeleteLine),
-            MenuItem::action("Duplicate line", "Alt+U", MenuAction::DuplicateLine),
-        ],
-    },
-    Menu {
-        title: "Search",
-        items: &[
             MenuItem::action("Find", "Ctrl+F", MenuAction::Find),
             MenuItem::action("Find next", "Ctrl+G", MenuAction::FindNext),
             MenuItem::action("Find previous", "Shift+F3", MenuAction::FindPrevious),
+            MenuItem::separator(),
+            MenuItem::action("Delete line", "Alt+X", MenuAction::DeleteLine),
+            MenuItem::action("Duplicate line", "Alt+U", MenuAction::DuplicateLine),
         ],
     },
     Menu {

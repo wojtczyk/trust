@@ -652,10 +652,6 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(" Build  ", base),
         Span::styled("F10", key),
         Span::styled(" Menu  ", base),
-        Span::styled("^Z", key),
-        Span::styled(" Undo  ", base),
-        Span::styled("^Y", key),
-        Span::styled(" Redo", base),
         Span::styled(suffix, base),
     ]);
     let width = line.width();

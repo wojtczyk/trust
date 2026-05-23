@@ -98,8 +98,7 @@ If no path is supplied, TRUST opens the current directory.
 - `Enter` activates the highlighted menu item.
 - `Esc` closes the menu.
 - Mouse clicks on the menu bar and dropdown items work too.
-- `Edit` now includes `Undo` and `Redo`.
-- `Search` contains find, find next, and find previous.
+- `Edit` contains undo/redo, clipboard, find, and line editing commands.
 - `Debug` contains start/continue, breakpoint, step, and stop commands.
 - `File > New` asks for a filename and creates it in the current project pane
   directory.
