@@ -13,6 +13,13 @@ pub struct Position {
     pub col: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub row: usize,
+    pub start_col: usize,
+    pub end_col: usize,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum Movement {
     Left,
@@ -127,6 +134,35 @@ impl Editor {
 
     pub fn text(&self) -> String {
         self.lines.join("\n")
+    }
+
+    pub fn find_matches(&self, query: &str) -> Vec<SearchMatch> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+
+        let needle = query.chars().collect::<Vec<_>>();
+        let needle_len = needle.len();
+        let mut matches = Vec::new();
+
+        for (row, line) in self.lines.iter().enumerate() {
+            let chars = line.chars().collect::<Vec<_>>();
+            if chars.len() < needle_len {
+                continue;
+            }
+
+            for start_col in 0..=chars.len() - needle_len {
+                if chars[start_col..start_col + needle_len] == needle[..] {
+                    matches.push(SearchMatch {
+                        row,
+                        start_col,
+                        end_col: start_col + needle_len,
+                    });
+                }
+            }
+        }
+
+        matches
     }
 
     pub fn cursor_row(&self) -> usize {
@@ -960,7 +996,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::Editor;
+    use super::{Editor, SearchMatch};
 
     #[test]
     fn selects_and_cuts_across_lines() {
@@ -986,6 +1022,33 @@ mod tests {
 
         assert_eq!(editor.lines(), &["hello rust".to_string()]);
         assert!(!editor.has_selection());
+    }
+
+    #[test]
+    fn finds_matches_across_multiple_lines() {
+        let mut editor = Editor::scratch();
+        editor.insert_text("alpha beta\nbeta alpha\nalphabet");
+
+        assert_eq!(
+            editor.find_matches("alpha"),
+            vec![
+                SearchMatch {
+                    row: 0,
+                    start_col: 0,
+                    end_col: 5,
+                },
+                SearchMatch {
+                    row: 1,
+                    start_col: 5,
+                    end_col: 10,
+                },
+                SearchMatch {
+                    row: 2,
+                    start_col: 0,
+                    end_col: 5,
+                },
+            ]
+        );
     }
 
     #[test]
