@@ -66,11 +66,7 @@ impl DebuggerSession {
             "settings set target.process.thread.step-avoid-regexp '^std::|^core::|^alloc::'",
         )?;
         for breakpoint in breakpoints {
-            session.send(&format!(
-                "breakpoint set --file '{}' --line {}",
-                breakpoint.path.display(),
-                breakpoint.line + 1
-            ))?;
+            session.send(&breakpoint_command(breakpoint)?)?;
         }
         session.send("run")?;
         Ok(session)
@@ -102,6 +98,40 @@ impl Drop for DebuggerSession {
     fn drop(&mut self) {
         let _ = self.stop();
     }
+}
+
+fn breakpoint_command(breakpoint: &SourceLocation) -> io::Result<String> {
+    let file = breakpoint.path.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "debugger breakpoint path is not valid UTF-8",
+        )
+    })?;
+    let file = lldb_quote_argument(file)?;
+    Ok(format!(
+        "breakpoint set --file {file} --line {}",
+        breakpoint.line + 1
+    ))
+}
+
+fn lldb_quote_argument(value: &str) -> io::Result<String> {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for character in value.chars() {
+        match character {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            _ if character.is_control() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "debugger command argument contains a control character",
+                ));
+            }
+            _ => quoted.push(character),
+        }
+    }
+    quoted.push('"');
+    Ok(quoted)
 }
 
 fn spawn_reader(
@@ -239,4 +269,56 @@ fn cargo_metadata(root: &Path) -> io::Result<CargoMetadata> {
 
     serde_json::from_slice(&output.stdout)
         .map_err(|error| io::Error::other(format!("invalid cargo metadata: {error}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{io::ErrorKind, path::PathBuf};
+
+    use super::{SourceLocation, breakpoint_command, lldb_quote_argument};
+
+    #[test]
+    fn quotes_lldb_command_arguments() {
+        assert_eq!(
+            lldb_quote_argument("src/main.rs").unwrap(),
+            "\"src/main.rs\""
+        );
+        assert_eq!(
+            lldb_quote_argument("src/file name.rs").unwrap(),
+            "\"src/file name.rs\""
+        );
+        assert_eq!(
+            lldb_quote_argument("src/quote\"name.rs").unwrap(),
+            "\"src/quote\\\"name.rs\""
+        );
+        assert_eq!(
+            lldb_quote_argument("src/back\\slash.rs").unwrap(),
+            "\"src/back\\\\slash.rs\""
+        );
+        assert_eq!(
+            lldb_quote_argument("src/single'quote.rs").unwrap(),
+            "\"src/single'quote.rs\""
+        );
+    }
+
+    #[test]
+    fn rejects_control_characters_in_lldb_arguments() {
+        let error = lldb_quote_argument("src/main.rs\nscript print('owned')")
+            .expect_err("newline should be rejected");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn builds_breakpoint_command_with_quoted_path() {
+        let breakpoint = SourceLocation {
+            path: PathBuf::from("src/quote\"name.rs"),
+            line: 2,
+        };
+
+        assert_eq!(
+            breakpoint_command(&breakpoint).unwrap(),
+            "breakpoint set --file \"src/quote\\\"name.rs\" --line 3"
+        );
+    }
 }

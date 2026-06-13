@@ -701,6 +701,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::from("F2 Save     F3 Open selected file    F4 Cycle focus"),
         Line::from("File > New creates a file"),
         Line::from("Project > New project runs cargo new"),
+        Line::from("Project > Enable rust-analyzer starts safer completions"),
         Line::from("F5 Run      F6 Toggle breakpoint     F7 Cargo check"),
         Line::from("F8 Test     F9 Build                 F10 Menu"),
         Line::from("Ctrl+D Debug/Continue  F11 Step Into  F12 Step Over"),
