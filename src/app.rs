@@ -3,6 +3,7 @@ use std::{
     fs, io,
     path::{Component, Path, PathBuf},
     process::Command,
+    sync::mpsc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -334,6 +335,12 @@ impl SearchState {
     }
 }
 
+#[derive(Debug)]
+struct DebugStartJob {
+    receiver: mpsc::Receiver<io::Result<DebuggerSession>>,
+    breakpoint_count: usize,
+}
+
 impl CompletionPopup {
     fn from_response(response: CompletionResponse) -> Self {
         Self {
@@ -397,6 +404,7 @@ pub struct App {
     search: SearchState,
     completion_engine: CompletionEngine,
     debugger: Option<DebuggerSession>,
+    debug_start: Option<DebugStartJob>,
     drag_target: Option<DragTarget>,
 }
 
@@ -434,6 +442,7 @@ impl App {
             search: SearchState::new(),
             completion_engine,
             debugger: None,
+            debug_start: None,
             drag_target: None,
         };
         app.messages.push("Ready.".to_string());
@@ -446,6 +455,7 @@ impl App {
     }
 
     pub fn tick(&mut self) {
+        self.finish_debug_start();
         while let Some(event) = self.debugger.as_mut().and_then(DebuggerSession::try_recv) {
             match event {
                 DebuggerEvent::Output(line) => {
@@ -470,6 +480,40 @@ impl App {
                         None => "Debug session exited".to_string(),
                     };
                 }
+            }
+        }
+    }
+
+    fn finish_debug_start(&mut self) {
+        let Some((result, breakpoint_count)) = self.debug_start.as_ref().and_then(|job| match job
+            .receiver
+            .try_recv()
+        {
+            Ok(result) => Some((result, job.breakpoint_count)),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => Some((
+                Err(io::Error::other("debugger startup disconnected")),
+                job.breakpoint_count,
+            )),
+        }) else {
+            return;
+        };
+
+        self.debug_start = None;
+        match result {
+            Ok(session) => {
+                self.debugger = Some(session);
+                self.debug_location = None;
+                self.focus = Focus::Messages;
+                self.status = if breakpoint_count == 0 {
+                    "Debugging without breakpoints".to_string()
+                } else {
+                    format!("Debugging with {breakpoint_count} breakpoint(s)")
+                };
+            }
+            Err(error) => {
+                self.status = format!("Could not start debugger: {error}");
+                self.push_message(self.status.clone());
             }
         }
     }
@@ -998,6 +1042,12 @@ impl App {
             return;
         }
 
+        if self.debug_start.is_some() {
+            self.status = "Debugger is already starting".to_string();
+            self.focus = Focus::Messages;
+            return;
+        }
+
         if !self.save_dirty_before("Debug start") {
             return;
         }
@@ -1012,27 +1062,31 @@ impl App {
                 })
             })
             .collect::<Vec<_>>();
+        let breakpoint_count = breakpoints.len();
 
         self.push_message("$ cargo build");
-        match DebuggerSession::start(&self.root, &breakpoints) {
-            Ok(session) => {
-                self.debugger = Some(session);
-                self.debug_location = None;
-                self.focus = Focus::Messages;
-                self.status = if breakpoints.is_empty() {
-                    "Debugging without breakpoints".to_string()
-                } else {
-                    format!("Debugging with {} breakpoint(s)", breakpoints.len())
-                };
-            }
-            Err(error) => {
-                self.status = format!("Could not start debugger: {error}");
-                self.push_message(self.status.clone());
-            }
-        }
+        let root = self.root.clone();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = DebuggerSession::start(&root, &breakpoints);
+            let _ = sender.send(result);
+        });
+        self.debug_start = Some(DebugStartJob {
+            receiver,
+            breakpoint_count,
+        });
+        self.debug_location = None;
+        self.focus = Focus::Messages;
+        self.status = "Starting debugger...".to_string();
     }
 
     pub fn stop_debug(&mut self) {
+        if self.debug_start.take().is_some() {
+            self.status = "Debug start canceled".to_string();
+            self.debug_location = None;
+            return;
+        }
+
         if let Some(mut debugger) = self.debugger.take() {
             let _ = debugger.stop();
             self.status = "Debug session stopped".to_string();
@@ -1069,7 +1123,7 @@ impl App {
     }
 
     pub fn debug_active(&self) -> bool {
-        self.debugger.is_some()
+        self.debugger.is_some() || self.debug_start.is_some()
     }
 
     fn focus_debug_location(&mut self, location: &SourceLocation) {
@@ -2579,6 +2633,25 @@ mod tests {
 
         app.find_next();
         assert_eq!(app.editor.cursor_col(), 0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stop_debug_cancels_pending_debug_start() {
+        let root = temp_project("debug-start-cancel");
+        let (_sender, receiver) = mpsc::channel();
+        let mut app = App::new_for_tests(root.clone());
+        app.debug_start = Some(DebugStartJob {
+            receiver,
+            breakpoint_count: 0,
+        });
+
+        app.stop_debug();
+
+        assert!(app.debug_start.is_none());
+        assert!(!app.debug_active());
+        assert_eq!(app.status, "Debug start canceled");
 
         let _ = fs::remove_dir_all(root);
     }
