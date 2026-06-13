@@ -20,13 +20,13 @@ Building and running "Hello World" in TRUST.
 
 | Starting a project | Running a console program |
 | --- | --- |
-| ![Hello project in TRUST](doc/1_hello.png) | ![Hello project editor view](doc/2_hello.png) |
+| ![Hello project in TRUST](assets/1_hello.png) | ![Hello project editor view](assets/2_hello.png) |
 
 TRUST can build TRUST.
 
 | TRUST Editor | Running Tests |
 | --- | --- |
-| ![TRUST project in TRUST](doc/3_trust.png) | ![TRUST menus and panes](doc/4_trust.png) |
+| ![TRUST project in TRUST](assets/3_trust.png) | ![TRUST menus and panes](assets/4_trust.png) |
 
 ## FAQ
 
