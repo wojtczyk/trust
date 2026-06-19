@@ -113,7 +113,7 @@ fn print_usage() {
     println!("  trust [PROJECT_PATH]");
     println!();
     println!(
-        "Keys: F1 Help, F2 Save, F3 Open, F5 Run, F6 Breakpoint, Ctrl+F Find, Ctrl+G Next Match, Ctrl+D Debug, F11/F12 Step, Ctrl+Space Complete, Ctrl+Z Undo, Ctrl+Y Redo, Ctrl+Q Quit"
+        "Keys: F1 Help, F2 Save, F3 Open, F5 Run, F6 Breakpoint, Ctrl+D Debug, F11/F12 Step, Ctrl+Space Complete, Ctrl+Z Undo, Ctrl+Y Redo, Ctrl+Q Quit"
     );
 }
 
@@ -216,13 +216,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
             KeyCode::Char('c') | KeyCode::Char('C') => app.copy_selection(),
             KeyCode::Char('x') | KeyCode::Char('X') => app.cut_selection(),
             KeyCode::Char('v') | KeyCode::Char('V') => app.paste_from_clipboard(),
-            KeyCode::Char('f') | KeyCode::Char('F') => app.open_find_dialog(),
-            KeyCode::Char('g') | KeyCode::Char('G') => app.find_next(),
             KeyCode::Char('z') | KeyCode::Char('Z') => app.undo_editor(),
             KeyCode::Char('y') | KeyCode::Char('Y') => app.redo_editor(),
             KeyCode::Char('s') | KeyCode::Char('S') => {
                 app.save_current();
             }
+            KeyCode::Char('f') | KeyCode::Char('F') => app.toggle_focus(),
             KeyCode::Char('o') | KeyCode::Char('O') => app.open_selected_file(),
             KeyCode::Char('r') | KeyCode::Char('R') => app.run_cargo("run"),
             KeyCode::Char('t') | KeyCode::Char('T') => app.run_cargo("test"),
@@ -289,7 +288,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::handle_key;
-    use crate::app::{Action, App, Dialog, Focus};
+    use crate::app::{Action, App, Focus};
 
     #[test]
     fn tab_in_editor_indents_instead_of_cycling_focus() {
@@ -397,26 +396,6 @@ mod tests {
 
             assert_eq!(app.editor.selected_text().as_deref(), Some(expected));
         }
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn control_f_opens_find_dialog() {
-        let root = temp_project("main-find");
-        let mut app = App::new_for_tests(root.clone());
-        app.dialog = None;
-        app.focus = Focus::Editor;
-
-        assert_eq!(
-            handle_key(
-                &mut app,
-                KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
-            ),
-            Action::None
-        );
-
-        assert_eq!(app.dialog, Some(Dialog::Find));
 
         let _ = fs::remove_dir_all(root);
     }

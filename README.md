@@ -60,15 +60,13 @@ If no path is supplied, TRUST opens the current directory.
 - `F2` / `Ctrl+S`: save
 - `F3` / `Ctrl+O`: open selected file
 - `Backspace`: go to the parent directory in the project pane
-- `F4`: cycle focus
+- `F4` / `Ctrl+F`: cycle focus
 - `F5` / `Ctrl+R`: `cargo run`
 - `F6`: toggle breakpoint on the current line
 - `F7`: `cargo check`
 - `F8` / `Ctrl+T`: `cargo test`
 - `F9` / `Ctrl+B`: `cargo build`
 - `F10`: open the menu bar
-- `Ctrl+F`: find in the current file
-- `Ctrl+G`: jump to the next search match
 - `Ctrl+Z`: undo
 - `Ctrl+Y` / `Ctrl+Shift+Z`: redo
 - `F11`: debugger step into
@@ -97,7 +95,6 @@ If no path is supplied, TRUST opens the current directory.
 - `Esc` closes the menu.
 - Mouse clicks on the menu bar and dropdown items work too.
 - `Edit` now includes `Undo` and `Redo`.
-- `Search` now includes `Find` and `Find next` for the current file.
 - `Debug` contains start/continue, breakpoint, step, and stop commands.
 - `File > New` asks for a filename and creates it in the current project pane
   directory.
