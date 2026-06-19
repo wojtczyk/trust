@@ -113,7 +113,7 @@ fn print_usage() {
     println!("  trust [PROJECT_PATH]");
     println!();
     println!(
-        "Keys: F1 Help, F2 Save, F3 Open, F5 Run, F6 Breakpoint, Ctrl+F Find, Ctrl+G Next Match, Ctrl+D Debug, F11/F12 Step, Ctrl+Space Complete, Ctrl+Z Undo, Ctrl+Y Redo, Ctrl+Q Quit"
+        "Keys: F1 Help, F2 Save, F3 Open, F5 Run, F6 Breakpoint, Ctrl+D Debug, F11/F12 Step, Ctrl+Space Complete, Ctrl+Z Undo, Ctrl+Y Redo, Ctrl+Q Quit"
     );
 }
 
@@ -166,7 +166,7 @@ fn run(terminal: &mut TerminalUi, app: &mut App) -> io::Result<()> {
                         break;
                     }
                 }
-                Event::Paste(text) => app.paste_text(&text),
+                Event::Paste(text) => app.handle_paste(&text),
                 Event::Resize(_, _) => {}
                 _ => {}
             }
@@ -212,17 +212,24 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
             return Action::None;
         }
 
+        if key.modifiers.contains(KeyModifiers::SHIFT)
+            && matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G'))
+        {
+            app.find_previous();
+            return Action::None;
+        }
+
         match key.code {
             KeyCode::Char('c') | KeyCode::Char('C') => app.copy_selection(),
             KeyCode::Char('x') | KeyCode::Char('X') => app.cut_selection(),
             KeyCode::Char('v') | KeyCode::Char('V') => app.paste_from_clipboard(),
-            KeyCode::Char('f') | KeyCode::Char('F') => app.open_find_dialog(),
-            KeyCode::Char('g') | KeyCode::Char('G') => app.find_next(),
             KeyCode::Char('z') | KeyCode::Char('Z') => app.undo_editor(),
             KeyCode::Char('y') | KeyCode::Char('Y') => app.redo_editor(),
             KeyCode::Char('s') | KeyCode::Char('S') => {
                 app.save_current();
             }
+            KeyCode::Char('f') | KeyCode::Char('F') => app.open_find_dialog(),
+            KeyCode::Char('g') | KeyCode::Char('G') => app.find_next(),
             KeyCode::Char('o') | KeyCode::Char('O') => app.open_selected_file(),
             KeyCode::Char('r') | KeyCode::Char('R') => app.run_cargo("run"),
             KeyCode::Char('t') | KeyCode::Char('T') => app.run_cargo("test"),
@@ -246,6 +253,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         KeyCode::F(2) => {
             app.save_current();
         }
+        KeyCode::F(3) if key.modifiers.contains(KeyModifiers::SHIFT) => app.find_previous(),
+        KeyCode::F(3) if app.find_active() && app.focus == app::Focus::Editor => app.find_next(),
         KeyCode::F(3) => app.open_selected_file(),
         KeyCode::F(4) => app.toggle_focus(),
         KeyCode::F(5) if key.modifiers.contains(KeyModifiers::SHIFT) => app.stop_debug(),
@@ -403,7 +412,7 @@ mod tests {
 
     #[test]
     fn control_f_opens_find_dialog() {
-        let root = temp_project("main-find");
+        let root = temp_project("main-find-dialog");
         let mut app = App::new_for_tests(root.clone());
         app.dialog = None;
         app.focus = Focus::Editor;
@@ -417,6 +426,37 @@ mod tests {
         );
 
         assert_eq!(app.dialog, Some(Dialog::Find));
+        assert_eq!(app.focus, Focus::Editor);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn control_g_routes_to_find_next() {
+        let root = temp_project("main-find-next");
+        let mut app = App::new_for_tests(root.clone());
+        app.dialog = None;
+        app.focus = Focus::Editor;
+        app.editor.insert_text("foo\nbar foo");
+        app.editor.set_cursor(0, 0);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+        );
+        for character in "foo".chars() {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!((app.editor.cursor_row(), app.editor.cursor_col()), (1, 4));
 
         let _ = fs::remove_dir_all(root);
     }

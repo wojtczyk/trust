@@ -63,7 +63,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_help(frame, centered(root, 72, 17));
     } else if let Some(dialog) = app.dialog {
         match dialog {
-            Dialog::Find => draw_find_dialog(frame, app, centered(root, 72, 9)),
+            Dialog::Find => draw_find_dialog(frame, app, centered(root, 66, 9)),
             Dialog::NewFile => draw_new_file_dialog(frame, app, centered(root, 66, 10)),
             Dialog::NewProject => draw_new_project_dialog(frame, app, centered(root, 74, 16)),
             Dialog::About | Dialog::CompileResult => {
@@ -364,8 +364,6 @@ fn draw_editor(frame: &mut Frame, area: Rect, app: &mut App) {
     let title = format!(" {}{} ", app.current_file_label(), dirty);
     let footer = if app.completion_visible() {
         "Ctrl+Space Complete"
-    } else if app.search_summary().is_some() {
-        "Ctrl+G Next"
     } else {
         "F2 Save"
     };
@@ -410,7 +408,7 @@ fn draw_editor(frame: &mut Frame, area: Rect, app: &mut App) {
                 col_offset,
                 text_cols,
                 app.editor.selection_range_for_line(file_row),
-                &app.search_match_ranges_for_line(file_row),
+                &app.find_ranges_for_line(file_row),
                 paused,
             ));
         } else {
@@ -623,13 +621,17 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         ""
     };
-    let search = app
-        .search_summary()
-        .map(|summary| format!("  {summary}"))
-        .unwrap_or_default();
     let debug = if app.debug_active() { "  Debug" } else { "" };
+    let find = if app.find_active() {
+        app.find
+            .current
+            .map(|index| format!("  Find {}/{}", index + 1, app.find.matches.len()))
+            .unwrap_or_else(|| "  Find 0/0".to_string())
+    } else {
+        String::new()
+    };
     let suffix = format!(
-        "  {position}{selection}{completion}{search}{debug}  {} ",
+        "  {position}{selection}{completion}{debug}{find}  {} ",
         app.status
     );
     let mut line = Line::from(vec![
@@ -650,10 +652,6 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(" Build  ", base),
         Span::styled("F10", key),
         Span::styled(" Menu  ", base),
-        Span::styled("^Z", key),
-        Span::styled(" Undo  ", base),
-        Span::styled("^Y", key),
-        Span::styled(" Redo", base),
         Span::styled(suffix, base),
     ]);
     let width = line.width();
@@ -708,8 +706,8 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::from("Shift+F11 Step Out     Shift+F5 Stop debug"),
         Line::from("Ctrl+Z Undo Ctrl+Y Redo Ctrl+C Copy Ctrl+Q Quit"),
         Line::from("Ctrl+X Cut  Ctrl+V Paste Ctrl+S Save Ctrl+F Find"),
-        Line::from("Ctrl+G Find next  Shift+Enter Find previous"),
-        Line::from("Ctrl+Space Complete"),
+        Line::from("Ctrl+G Find next  Shift+F3 Find previous"),
+        Line::from("Ctrl+Space Complete   F4 Cycle focus"),
         Line::from("Tab Indent  Shift+Tab Unindent"),
         Line::from("Alt+U Duplicate line   Alt+X Delete line"),
         Line::from("Shift+Arrows/Home/End/Page selects text"),
@@ -800,19 +798,15 @@ fn draw_find_dialog(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let query = truncate(&app.find.query, inner.width.saturating_sub(14).max(1));
-    let match_summary = if app.find.query.is_empty() {
-        "Type to search in the current file.".to_string()
-    } else if app.search_summary().is_some() {
-        app.search_summary().unwrap_or_default()
-    } else {
-        "Find 0".to_string()
-    };
-
+    let query = truncate(
+        &app.find.query.replace('\n', "\\n"),
+        inner.width.saturating_sub(10).max(1),
+    );
+    let summary = truncate(&app.find_summary(), inner.width);
     let text = Text::from(vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled(" Query ", Style::default().fg(DOS_BLACK).bg(DOS_GRAY)),
+            Span::styled(" Find ", Style::default().fg(DOS_BLACK).bg(DOS_GRAY)),
             Span::styled(
                 format!(" {query} "),
                 Style::default()
@@ -822,9 +816,12 @@ fn draw_find_dialog(frame: &mut Frame, app: &App, area: Rect) {
             ),
         ]),
         Line::from(""),
-        Line::from(format!(" {match_summary}")),
+        Line::from(Span::styled(
+            summary,
+            Style::default().fg(DOS_BLUE).bg(DOS_CYAN),
+        )),
         Line::from(""),
-        Line::from(" Enter next  Shift+Enter previous  Esc close "),
+        Line::from(" Enter keeps. Esc clears. Down/F3 next. Up/Shift+F3 previous."),
     ]);
 
     frame.render_widget(
@@ -833,15 +830,6 @@ fn draw_find_dialog(frame: &mut Frame, app: &App, area: Rect) {
             .wrap(Wrap { trim: true }),
         inner,
     );
-
-    if app.dialog == Some(Dialog::Find) {
-        let cursor_x = inner
-            .x
-            .saturating_add(8 + app.find.query.chars().count() as u16);
-        let cursor_x = cursor_x.min(inner.x.saturating_add(inner.width.saturating_sub(1)));
-        let cursor_y = inner.y.saturating_add(1);
-        frame.set_cursor_position((cursor_x, cursor_y));
-    }
 }
 
 fn draw_new_file_dialog(frame: &mut Frame, app: &App, area: Rect) {
@@ -1034,7 +1022,7 @@ fn render_editor_line(
     col_offset: usize,
     text_cols: usize,
     selection: Option<(usize, usize)>,
-    search_matches: &[(usize, usize, bool)],
+    search_ranges: &[crate::app::SearchRange],
     paused: bool,
 ) -> Vec<Span<'static>> {
     let chars = line
@@ -1044,42 +1032,42 @@ fn render_editor_line(
         .collect::<Vec<_>>();
     let mut spans = Vec::new();
     let mut run = String::new();
-    let mut run_kind = None;
+    let mut run_style = None;
 
     for (screen_col, character) in chars.into_iter().enumerate() {
         let absolute_col = col_offset + screen_col;
-        let selected = selection
+        let style = if selection
             .map(|(start, end)| absolute_col >= start && absolute_col < end)
-            .unwrap_or(false);
-        let search_kind = if selected {
-            HighlightKind::Selected
-        } else if search_matches
-            .iter()
-            .any(|(start, end, active)| *active && absolute_col >= *start && absolute_col < *end)
+            .unwrap_or(false)
         {
-            HighlightKind::ActiveSearch
-        } else if search_matches
+            EditorCellStyle::Selected
+        } else if search_ranges
             .iter()
-            .any(|(start, end, _)| absolute_col >= *start && absolute_col < *end)
+            .any(|range| range.current && absolute_col >= range.start && absolute_col < range.end)
         {
-            HighlightKind::Search
+            EditorCellStyle::CurrentSearch
+        } else if search_ranges
+            .iter()
+            .any(|range| absolute_col >= range.start && absolute_col < range.end)
+        {
+            EditorCellStyle::Search
         } else {
-            HighlightKind::Normal
+            EditorCellStyle::Normal
         };
 
-        if run_kind == Some(search_kind) || run_kind.is_none() {
+        if run_style == Some(style) || run_style.is_none() {
             run.push(character);
-            run_kind = Some(search_kind);
+            run_style = Some(style);
         } else {
             push_editor_run(
                 &mut spans,
                 &run,
-                run_kind.unwrap_or(HighlightKind::Normal),
+                run_style.unwrap_or(EditorCellStyle::Normal),
                 paused,
             );
             run.clear();
             run.push(character);
-            run_kind = Some(search_kind);
+            run_style = Some(style);
         }
     }
 
@@ -1087,7 +1075,7 @@ fn render_editor_line(
         push_editor_run(
             &mut spans,
             &run,
-            run_kind.unwrap_or(HighlightKind::Normal),
+            run_style.unwrap_or(EditorCellStyle::Normal),
             paused,
         );
     }
@@ -1096,36 +1084,39 @@ fn render_editor_line(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HighlightKind {
+enum EditorCellStyle {
     Normal,
-    Search,
-    ActiveSearch,
     Selected,
+    Search,
+    CurrentSearch,
 }
 
-fn push_editor_run(spans: &mut Vec<Span<'static>>, run: &str, kind: HighlightKind, paused: bool) {
-    match kind {
-        HighlightKind::Selected => spans.push(Span::styled(
+fn push_editor_run(
+    spans: &mut Vec<Span<'static>>,
+    run: &str,
+    style: EditorCellStyle,
+    paused: bool,
+) {
+    match style {
+        EditorCellStyle::Normal => spans.extend(highlight_rust(run, paused)),
+        EditorCellStyle::Selected => spans.push(Span::styled(
             run.to_string(),
             Style::default()
                 .fg(DOS_BLACK)
                 .bg(DOS_CYAN)
                 .add_modifier(Modifier::BOLD),
         )),
-        HighlightKind::ActiveSearch => spans.push(Span::styled(
+        EditorCellStyle::Search => spans.push(Span::styled(
+            run.to_string(),
+            Style::default().fg(DOS_BLACK).bg(DOS_YELLOW),
+        )),
+        EditorCellStyle::CurrentSearch => spans.push(Span::styled(
             run.to_string(),
             Style::default()
-                .fg(DOS_BLACK)
-                .bg(DOS_YELLOW)
+                .fg(DOS_WHITE)
+                .bg(DOS_RED)
                 .add_modifier(Modifier::BOLD),
         )),
-        HighlightKind::Search => spans.push(Span::styled(
-            run.to_string(),
-            Style::default().fg(DOS_YELLOW).bg(DOS_DARK_GRAY),
-        )),
-        HighlightKind::Normal => {
-            spans.extend(highlight_rust(run, paused));
-        }
     }
 }
 

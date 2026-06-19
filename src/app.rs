@@ -12,12 +12,12 @@ use ratatui::layout::Rect;
 
 use crate::{
     debugger::{DebuggerEvent, DebuggerSession, SourceLocation},
-    editor::{Editor, SearchMatch},
+    editor::{Editor, Position},
     ide::{CompletionCandidate, CompletionEngine, CompletionResponse},
     project::{ProjectEntry, list_project_dir},
 };
 
-pub const MENUS: [Menu; 9] = [
+pub const MENUS: [Menu; 8] = [
     Menu {
         title: "File",
         items: &[
@@ -38,15 +38,12 @@ pub const MENUS: [Menu; 9] = [
             MenuItem::action("Cut", "Ctrl+X", MenuAction::Cut),
             MenuItem::action("Paste", "Ctrl+V", MenuAction::Paste),
             MenuItem::separator(),
-            MenuItem::action("Delete line", "Alt+X", MenuAction::DeleteLine),
-            MenuItem::action("Duplicate line", "Alt+U", MenuAction::DuplicateLine),
-        ],
-    },
-    Menu {
-        title: "Search",
-        items: &[
             MenuItem::action("Find", "Ctrl+F", MenuAction::Find),
             MenuItem::action("Find next", "Ctrl+G", MenuAction::FindNext),
+            MenuItem::action("Find previous", "Shift+F3", MenuAction::FindPrevious),
+            MenuItem::separator(),
+            MenuItem::action("Delete line", "Alt+X", MenuAction::DeleteLine),
+            MenuItem::action("Duplicate line", "Alt+U", MenuAction::DuplicateLine),
         ],
     },
     Menu {
@@ -154,6 +151,7 @@ pub enum MenuAction {
     DuplicateLine,
     Find,
     FindNext,
+    FindPrevious,
     CargoRun,
     CargoTest,
     CargoCheck,
@@ -218,19 +216,6 @@ impl NewFileForm {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct FindForm {
-    pub query: String,
-}
-
-impl FindForm {
-    fn new() -> Self {
-        Self {
-            query: String::new(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NewProjectKind {
     Bin,
@@ -288,6 +273,34 @@ impl NewProjectForm {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub start: Position,
+    pub end: Position,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchRange {
+    pub start: usize,
+    pub end: usize,
+    pub current: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FindState {
+    pub query: String,
+    pub matches: Vec<SearchMatch>,
+    pub current: Option<usize>,
+}
+
+impl FindState {
+    fn clear(&mut self) {
+        self.query.clear();
+        self.matches.clear();
+        self.current = None;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DragTarget {
     ProjectDivider,
     MessageDivider,
@@ -316,23 +329,6 @@ pub struct CompletionPopup {
     pub scroll: usize,
     pub replace_start: usize,
     pub replace_end: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct SearchState {
-    pub query: String,
-    pub matches: Vec<SearchMatch>,
-    pub active: Option<usize>,
-}
-
-impl SearchState {
-    fn new() -> Self {
-        Self {
-            query: String::new(),
-            matches: Vec::new(),
-            active: None,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -392,8 +388,8 @@ pub struct App {
     pub help_open: bool,
     pub dialog: Option<Dialog>,
     pub new_file: NewFileForm,
-    pub find: FindForm,
     pub new_project: NewProjectForm,
+    pub find: FindState,
     pub status: String,
     pub project_pane_width: u16,
     pub messages_pane_height: u16,
@@ -401,7 +397,6 @@ pub struct App {
     pub completion_popup: Option<CompletionPopup>,
     pub breakpoints: BTreeMap<PathBuf, BTreeSet<usize>>,
     pub debug_location: Option<SourceLocation>,
-    search: SearchState,
     completion_engine: CompletionEngine,
     debugger: Option<DebuggerSession>,
     debug_start: Option<DebugStartJob>,
@@ -431,7 +426,7 @@ impl App {
             help_open: false,
             dialog: Some(Dialog::About),
             new_file: NewFileForm::new(),
-            find: FindForm::new(),
+            find: FindState::default(),
             status: "Welcome to TRUST".to_string(),
             project_pane_width: 30,
             messages_pane_height: 6,
@@ -439,7 +434,6 @@ impl App {
             completion_popup: None,
             breakpoints: BTreeMap::new(),
             debug_location: None,
-            search: SearchState::new(),
             completion_engine,
             debugger: None,
             debug_start: None,
@@ -565,35 +559,6 @@ impl App {
             .unwrap_or_else(|| "Untitled".to_string())
     }
 
-    pub fn search_match_ranges_for_line(&self, row: usize) -> Vec<(usize, usize, bool)> {
-        self.search
-            .matches
-            .iter()
-            .enumerate()
-            .filter(|(_, search_match)| search_match.row == row)
-            .map(|(index, search_match)| {
-                (
-                    search_match.start_col,
-                    search_match.end_col,
-                    self.search.active == Some(index),
-                )
-            })
-            .collect()
-    }
-
-    pub fn search_summary(&self) -> Option<String> {
-        if self.search.query.is_empty() {
-            return None;
-        }
-
-        if self.search.matches.is_empty() {
-            return Some("Find 0".to_string());
-        }
-
-        let current = self.search.active.unwrap_or(0) + 1;
-        Some(format!("Find {current}/{}", self.search.matches.len()))
-    }
-
     pub fn browser_label(&self) -> String {
         self.browser_dir
             .strip_prefix(&self.root)
@@ -601,6 +566,44 @@ impl App {
             .filter(|path| !path.as_os_str().is_empty())
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| ".".to_string())
+    }
+
+    pub fn find_active(&self) -> bool {
+        !self.find.query.is_empty()
+    }
+
+    pub fn find_summary(&self) -> String {
+        if self.find.query.is_empty() {
+            return "Find: type search text".to_string();
+        }
+
+        let total = self.find.matches.len();
+        let query = visible_find_query(&self.find.query);
+        if total == 0 {
+            format!("Find: no matches for {query}")
+        } else {
+            let current = self.find.current.unwrap_or(0).min(total - 1) + 1;
+            format!("Find: {current}/{total} {query}")
+        }
+    }
+
+    pub fn find_ranges_for_line(&self, row: usize) -> Vec<SearchRange> {
+        self.find
+            .matches
+            .iter()
+            .enumerate()
+            .filter_map(|(index, search_match)| {
+                search_range_for_line(
+                    search_match,
+                    row,
+                    self.editor
+                        .line(row)
+                        .map(|line| line.chars().count())
+                        .unwrap_or(0),
+                    self.find.current == Some(index),
+                )
+            })
+            .collect()
     }
 
     pub fn open_selected_file(&mut self) {
@@ -640,8 +643,8 @@ impl App {
         match Editor::open(&path) {
             Ok(editor) => {
                 self.editor = editor;
+                self.clear_find();
                 self.close_completion();
-                self.refresh_search_matches(true);
                 self.focus = Focus::Editor;
                 self.status = format!("Opened {label}");
                 self.push_message(format!("Opened {}", path.display()));
@@ -765,172 +768,6 @@ impl App {
         self.status = format!("Saved {label}");
         self.push_message(format!("Saved {label}"));
         Ok(())
-    }
-
-    pub fn open_find_dialog(&mut self) {
-        self.close_menu();
-        self.close_completion();
-        if let Some(selection) = self.editor.selected_text() {
-            if !selection.is_empty() && !selection.contains('\n') {
-                self.find.query = selection;
-            }
-        } else if self.find.query.is_empty() {
-            self.find.query = self.search.query.clone();
-        }
-        self.dialog = Some(Dialog::Find);
-        self.refresh_search_matches(true);
-        self.status = if self.find.query.is_empty() {
-            "Find: type a query".to_string()
-        } else if self.search.matches.is_empty() {
-            format!("Find: no matches for {:?}", self.find.query)
-        } else {
-            format!("Find: {} match(es)", self.search.matches.len())
-        };
-    }
-
-    pub fn find_next(&mut self) {
-        self.close_menu();
-        self.close_completion();
-        self.dialog = None;
-        self.help_open = false;
-
-        if self.search.query.is_empty() {
-            self.open_find_dialog();
-            return;
-        }
-
-        if self.search.matches.is_empty() {
-            self.status = format!("Find: no matches for {:?}", self.search.query);
-            return;
-        }
-
-        if let Some(index) = self.search.active {
-            if !self.active_search_is_at_cursor(index) {
-                self.activate_search_match(index);
-                return;
-            }
-        }
-
-        let next = match self.search.active {
-            Some(index) => (index + 1) % self.search.matches.len(),
-            None => self.search_index_from_cursor(false).unwrap_or(0),
-        };
-        self.activate_search_match(next);
-    }
-
-    pub fn find_previous(&mut self) {
-        self.close_menu();
-        self.close_completion();
-        self.dialog = None;
-        self.help_open = false;
-
-        if self.search.query.is_empty() {
-            self.open_find_dialog();
-            return;
-        }
-
-        if self.search.matches.is_empty() {
-            self.status = format!("Find: no matches for {:?}", self.search.query);
-            return;
-        }
-
-        if let Some(index) = self.search.active {
-            if !self.active_search_is_at_cursor(index) {
-                self.activate_search_match(index);
-                return;
-            }
-        }
-
-        let previous = match self.search.active {
-            Some(0) => self.search.matches.len() - 1,
-            Some(index) => index - 1,
-            None => self
-                .search_index_from_cursor(true)
-                .unwrap_or(self.search.matches.len() - 1),
-        };
-        self.activate_search_match(previous);
-    }
-
-    fn refresh_search_matches(&mut self, preserve_active: bool) {
-        let query = self.find.query.clone();
-        if query.is_empty() {
-            self.search = SearchState::new();
-            return;
-        }
-
-        let previous_active = if preserve_active {
-            self.search
-                .active
-                .and_then(|index| self.search.matches.get(index))
-                .copied()
-        } else {
-            None
-        };
-
-        self.search.query = query;
-        self.search.matches = self.editor.find_matches(&self.search.query);
-        self.search.active = previous_active
-            .and_then(|search_match| {
-                self.search
-                    .matches
-                    .iter()
-                    .position(|candidate| *candidate == search_match)
-            })
-            .or_else(|| self.search_index_from_cursor(false));
-    }
-
-    fn search_index_from_cursor(&self, reverse: bool) -> Option<usize> {
-        let row = self.editor.cursor_row();
-        let col = self.editor.cursor_col();
-        if reverse {
-            self.search
-                .matches
-                .iter()
-                .rposition(|search_match| {
-                    search_match.row < row
-                        || (search_match.row == row && search_match.start_col < col)
-                })
-                .or_else(|| self.search.matches.len().checked_sub(1))
-        } else {
-            self.search
-                .matches
-                .iter()
-                .position(|search_match| {
-                    search_match.row > row
-                        || (search_match.row == row && search_match.start_col >= col)
-                })
-                .or_else(|| {
-                    if self.search.matches.is_empty() {
-                        None
-                    } else {
-                        Some(0)
-                    }
-                })
-        }
-    }
-
-    fn activate_search_match(&mut self, index: usize) {
-        let Some(search_match) = self.search.matches.get(index).copied() else {
-            return;
-        };
-        self.search.active = Some(index);
-        self.focus = Focus::Editor;
-        self.editor
-            .set_cursor(search_match.row, search_match.start_col);
-        self.status = format!(
-            "Match {}/{} at line {}, column {}",
-            index + 1,
-            self.search.matches.len(),
-            search_match.row + 1,
-            search_match.start_col + 1
-        );
-    }
-
-    fn active_search_is_at_cursor(&self, index: usize) -> bool {
-        self.search.matches.get(index).is_some_and(|search_match| {
-            self.editor.cursor_row() == search_match.row
-                && self.editor.cursor_col() == search_match.start_col
-        })
     }
 
     pub fn request_completion(&mut self, force: bool) {
@@ -1167,6 +1004,79 @@ impl App {
         }
     }
 
+    fn handle_find_key(&mut self, key: KeyEvent) -> Action {
+        match key.code {
+            KeyCode::Esc => {
+                self.dialog = None;
+                self.clear_find();
+                self.status = "Find cleared".to_string();
+            }
+            KeyCode::Enter => {
+                self.dialog = None;
+                if self.find.query.is_empty() {
+                    self.clear_find();
+                    self.status = "Find cleared".to_string();
+                } else {
+                    self.refresh_find_matches_from_cursor();
+                    self.jump_to_current_find_match();
+                }
+            }
+            KeyCode::Backspace => {
+                self.find.query.pop();
+                self.refresh_find_matches_from_cursor();
+                self.jump_to_current_find_match();
+            }
+            KeyCode::F(3) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.find_previous();
+                self.dialog = Some(Dialog::Find);
+            }
+            KeyCode::F(3) | KeyCode::Down => {
+                self.find_next();
+                self.dialog = Some(Dialog::Find);
+            }
+            KeyCode::Up => {
+                self.find_previous();
+                self.dialog = Some(Dialog::Find);
+            }
+            KeyCode::Char('g') | KeyCode::Char('G')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                self.find_previous();
+                self.dialog = Some(Dialog::Find);
+            }
+            KeyCode::Char('g') | KeyCode::Char('G')
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.find_next();
+                self.dialog = Some(Dialog::Find);
+            }
+            KeyCode::Char('v') | KeyCode::Char('V')
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                match crate::clipboard::get_text() {
+                    Ok(text) => self.append_find_text(&text),
+                    Err(error) => self.status = format!("Paste failed: {error}"),
+                }
+            }
+            KeyCode::Char(character)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.append_find_text(&character.to_string());
+            }
+            _ => {}
+        }
+
+        Action::None
+    }
+
+    fn append_find_text(&mut self, text: &str) {
+        self.find.query.push_str(text);
+        self.refresh_find_matches_from_cursor();
+        self.jump_to_current_find_match();
+    }
+
     fn handle_new_file_key(&mut self, key: KeyEvent) -> Action {
         match key.code {
             KeyCode::Esc => self.dialog = None,
@@ -1175,44 +1085,6 @@ impl App {
                 self.new_file.name.pop();
             }
             KeyCode::Char(character) => self.new_file.name.push(character),
-            _ => {}
-        }
-
-        Action::None
-    }
-
-    fn handle_find_key(&mut self, key: KeyEvent) -> Action {
-        match key.code {
-            KeyCode::Esc => self.dialog = None,
-            KeyCode::Enter => {
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    self.find_previous();
-                } else {
-                    self.find_next();
-                }
-            }
-            KeyCode::Backspace => {
-                self.find.query.pop();
-                self.refresh_search_matches(false);
-                self.status = if self.find.query.is_empty() {
-                    "Find: type a query".to_string()
-                } else if self.search.matches.is_empty() {
-                    format!("Find: no matches for {:?}", self.find.query)
-                } else {
-                    format!("Find: {} match(es)", self.search.matches.len())
-                };
-            }
-            KeyCode::Char(character)
-                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
-            {
-                self.find.query.push(character);
-                self.refresh_search_matches(false);
-                self.status = if self.search.matches.is_empty() {
-                    format!("Find: no matches for {:?}", self.find.query)
-                } else {
-                    format!("Find: {} match(es)", self.search.matches.len())
-                };
-            }
             _ => {}
         }
 
@@ -1258,6 +1130,137 @@ impl App {
         self.new_project = NewProjectForm::new(&self.browser_dir);
         self.dialog = Some(Dialog::NewProject);
         self.status = "New Cargo project".to_string();
+    }
+
+    pub fn open_find_dialog(&mut self) {
+        self.close_menu();
+        self.close_completion();
+        self.help_open = false;
+        self.focus = Focus::Editor;
+        self.dialog = Some(Dialog::Find);
+
+        if let Some(selection) = self.editor.selected_text()
+            && !selection.contains('\n')
+            && !selection.is_empty()
+        {
+            self.find.query = selection;
+            self.refresh_find_matches_from_cursor();
+            self.jump_to_current_find_match();
+        }
+
+        self.status = self.find_summary();
+    }
+
+    pub fn find_next(&mut self) {
+        self.close_menu();
+        self.close_completion();
+        self.focus = Focus::Editor;
+
+        if self.find.query.is_empty() {
+            self.open_find_dialog();
+            return;
+        }
+
+        self.refresh_find_matches_preserving_current();
+        let total = self.find.matches.len();
+        if total == 0 {
+            self.status = self.find_summary();
+            return;
+        }
+
+        self.find.current = Some(self.find.current.map_or(0, |index| (index + 1) % total));
+        self.jump_to_current_find_match();
+    }
+
+    pub fn find_previous(&mut self) {
+        self.close_menu();
+        self.close_completion();
+        self.focus = Focus::Editor;
+
+        if self.find.query.is_empty() {
+            self.open_find_dialog();
+            return;
+        }
+
+        self.refresh_find_matches_preserving_current();
+        let total = self.find.matches.len();
+        if total == 0 {
+            self.status = self.find_summary();
+            return;
+        }
+
+        self.find.current = Some(match self.find.current {
+            Some(0) | None => total - 1,
+            Some(index) => index - 1,
+        });
+        self.jump_to_current_find_match();
+    }
+
+    fn clear_find(&mut self) {
+        self.find.clear();
+    }
+
+    fn update_find_after_edit(&mut self) {
+        if !self.find.query.is_empty() {
+            self.refresh_find_matches_preserving_current();
+        }
+    }
+
+    fn refresh_find_matches_from_cursor(&mut self) {
+        self.find.matches = find_matches(&self.editor.text(), &self.find.query);
+        if self.find.query.is_empty() || self.find.matches.is_empty() {
+            self.find.current = None;
+        } else {
+            let cursor = Position {
+                row: self.editor.cursor_row(),
+                col: self.editor.cursor_col(),
+            };
+            self.find.current = self
+                .find
+                .matches
+                .iter()
+                .position(|search_match| search_match.start >= cursor)
+                .or(Some(0));
+        }
+        self.status = self.find_summary();
+    }
+
+    fn refresh_find_matches_preserving_current(&mut self) {
+        let current_start = self
+            .find
+            .current
+            .and_then(|index| self.find.matches.get(index))
+            .map(|search_match| search_match.start);
+        self.find.matches = find_matches(&self.editor.text(), &self.find.query);
+        if self.find.query.is_empty() || self.find.matches.is_empty() {
+            self.find.current = None;
+        } else if let Some(current_start) = current_start {
+            self.find.current = self
+                .find
+                .matches
+                .iter()
+                .position(|search_match| search_match.start >= current_start)
+                .or(Some(0));
+        } else {
+            self.find.current = Some(0);
+        }
+        self.status = self.find_summary();
+    }
+
+    fn jump_to_current_find_match(&mut self) {
+        let Some(search_match) = self
+            .find
+            .current
+            .and_then(|index| self.find.matches.get(index))
+            .copied()
+        else {
+            self.status = self.find_summary();
+            return;
+        };
+
+        self.editor
+            .set_cursor(search_match.start.row, search_match.start.col);
+        self.status = self.find_summary();
     }
 
     fn next_new_project_field(&mut self) {
@@ -1406,6 +1409,7 @@ impl App {
                     self.browser_dir = self.root.clone();
                     self.selected_file = 0;
                     self.editor = Editor::scratch();
+                    self.clear_find();
                     self.breakpoints.clear();
                     self.completion_engine.refresh_root(&self.root);
                     self.close_completion();
@@ -1574,14 +1578,15 @@ impl App {
             MenuAction::Paste => self.paste_from_clipboard(),
             MenuAction::DeleteLine => {
                 self.editor.delete_line();
-                self.refresh_search_matches(true);
+                self.update_find_after_edit();
             }
             MenuAction::DuplicateLine => {
                 self.editor.duplicate_line();
-                self.refresh_search_matches(true);
+                self.update_find_after_edit();
             }
             MenuAction::Find => self.open_find_dialog(),
             MenuAction::FindNext => self.find_next(),
+            MenuAction::FindPrevious => self.find_previous(),
             MenuAction::CargoRun => self.run_cargo("run"),
             MenuAction::CargoTest => self.run_cargo("test"),
             MenuAction::CargoCheck => self.run_cargo("check"),
@@ -1629,7 +1634,7 @@ impl App {
         match crate::clipboard::set_text(&text) {
             Ok(()) => {
                 self.editor.cut_selection();
-                self.refresh_search_matches(true);
+                self.update_find_after_edit();
                 self.status = format!("Cut {} characters", text.chars().count());
             }
             Err(error) => self.status = format!("Cut failed: {error}"),
@@ -1642,7 +1647,7 @@ impl App {
         self.help_open = false;
         self.focus = Focus::Editor;
         if self.editor.undo() {
-            self.refresh_search_matches(true);
+            self.update_find_after_edit();
             self.status = if self.editor.can_undo() {
                 "Undo".to_string()
             } else {
@@ -1659,7 +1664,7 @@ impl App {
         self.help_open = false;
         self.focus = Focus::Editor;
         if self.editor.redo() {
-            self.refresh_search_matches(true);
+            self.update_find_after_edit();
             self.status = if self.editor.can_redo() {
                 "Redo".to_string()
             } else {
@@ -1677,6 +1682,14 @@ impl App {
         }
     }
 
+    pub fn handle_paste(&mut self, text: &str) {
+        if self.dialog == Some(Dialog::Find) {
+            self.append_find_text(text);
+        } else {
+            self.paste_text(text);
+        }
+    }
+
     pub fn paste_text(&mut self, text: &str) {
         if text.is_empty() {
             self.status = "Clipboard is empty".to_string();
@@ -1687,8 +1700,8 @@ impl App {
         self.help_open = false;
         self.focus = Focus::Editor;
         self.editor.insert_text(text);
-        self.refresh_search_matches(true);
         self.close_completion();
+        self.update_find_after_edit();
         self.status = format!("Pasted {} characters", text.chars().count());
     }
 
@@ -1896,12 +1909,10 @@ impl App {
             let handled = match key.code {
                 KeyCode::Char('x') | KeyCode::Char('X') => {
                     self.editor.delete_line();
-                    self.refresh_search_matches(true);
                     true
                 }
                 KeyCode::Char('u') | KeyCode::Char('U') => {
                     self.editor.duplicate_line();
-                    self.refresh_search_matches(true);
                     true
                 }
                 _ => false,
@@ -1909,11 +1920,13 @@ impl App {
 
             if handled {
                 self.close_completion();
+                self.update_find_after_edit();
                 return;
             }
         }
 
         let selecting = key.modifiers.contains(KeyModifiers::SHIFT);
+        let mut edited = false;
         match key.code {
             KeyCode::Left if selecting => {
                 self.editor.extend_left();
@@ -1981,38 +1994,38 @@ impl App {
             }
             KeyCode::Backspace => {
                 self.editor.backspace();
-                self.refresh_search_matches(true);
                 self.request_completion(false);
+                edited = true;
             }
             KeyCode::Delete => {
                 self.editor.delete();
-                self.refresh_search_matches(true);
                 self.request_completion(false);
+                edited = true;
             }
             KeyCode::Enter => {
                 self.editor.insert_newline();
-                self.refresh_search_matches(true);
                 self.close_completion();
+                edited = true;
             }
             KeyCode::BackTab => {
                 self.editor.unindent();
-                self.refresh_search_matches(true);
                 self.close_completion();
+                edited = true;
             }
             KeyCode::Tab if selecting => {
                 self.editor.unindent();
-                self.refresh_search_matches(true);
                 self.close_completion();
+                edited = true;
             }
             KeyCode::Tab => {
                 self.editor.indent();
-                self.refresh_search_matches(true);
                 self.close_completion();
+                edited = true;
             }
             KeyCode::Char(character) => {
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
                     self.editor.insert_char(character);
-                    self.refresh_search_matches(true);
+                    edited = true;
                     if character.is_alphanumeric() || matches!(character, '_' | '.') {
                         self.request_completion(false);
                     } else {
@@ -2021,6 +2034,10 @@ impl App {
                 }
             }
             _ => self.close_completion(),
+        }
+
+        if edited {
+            self.update_find_after_edit();
         }
     }
 
@@ -2335,6 +2352,74 @@ fn contains_y(area: Rect, row: u16) -> bool {
     row >= area.y && row < area.y.saturating_add(area.height)
 }
 
+fn find_matches(text: &str, query: &str) -> Vec<SearchMatch> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    let mut matches = Vec::new();
+    let mut offset = 0;
+    while let Some(relative_start) = text[offset..].find(query) {
+        let start = offset + relative_start;
+        let end = start + query.len();
+        matches.push(SearchMatch {
+            start: position_for_byte_offset(text, start),
+            end: position_for_byte_offset(text, end),
+        });
+        offset = end;
+    }
+
+    matches
+}
+
+fn visible_find_query(query: &str) -> String {
+    query.replace('\n', "\\n")
+}
+
+fn position_for_byte_offset(text: &str, offset: usize) -> Position {
+    let mut row = 0;
+    let mut col = 0;
+    for character in text[..offset.min(text.len())].chars() {
+        if character == '\n' {
+            row += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+
+    Position { row, col }
+}
+
+fn search_range_for_line(
+    search_match: &SearchMatch,
+    row: usize,
+    line_len: usize,
+    current: bool,
+) -> Option<SearchRange> {
+    if row < search_match.start.row || row > search_match.end.row {
+        return None;
+    }
+
+    let (start, end) = if search_match.start.row == search_match.end.row {
+        (search_match.start.col, search_match.end.col)
+    } else if row == search_match.start.row {
+        (search_match.start.col, line_len)
+    } else if row == search_match.end.row {
+        (0, search_match.end.col)
+    } else {
+        (0, line_len)
+    };
+
+    let start = start.min(line_len);
+    let end = end.min(line_len);
+    (start < end).then_some(SearchRange {
+        start,
+        end,
+        current,
+    })
+}
+
 fn is_selection_navigation_key(key: KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::SHIFT)
         && matches!(
@@ -2616,28 +2701,6 @@ mod tests {
     }
 
     #[test]
-    fn find_next_wraps_through_matches() {
-        let root = temp_project("find-next-wraps");
-        let mut app = App::new_for_tests(root.clone());
-        app.dialog = None;
-        app.focus = Focus::Editor;
-        app.editor.insert_text("foo bar foo");
-        app.find.query = "foo".to_string();
-        app.refresh_search_matches(false);
-
-        app.find_next();
-        assert_eq!(app.editor.cursor_col(), 0);
-
-        app.find_next();
-        assert_eq!(app.editor.cursor_col(), 8);
-
-        app.find_next();
-        assert_eq!(app.editor.cursor_col(), 0);
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn stop_debug_cancels_pending_debug_start() {
         let root = temp_project("debug-start-cancel");
         let (_sender, receiver) = mpsc::channel();
@@ -2652,6 +2715,160 @@ mod tests {
         assert!(app.debug_start.is_none());
         assert!(!app.debug_active());
         assert_eq!(app.status, "Debug start canceled");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn find_dialog_typing_highlights_and_jumps_to_first_match() {
+        let root = temp_project("find-dialog");
+        let mut app = App::new_for_tests(root.clone());
+        app.dialog = None;
+        app.focus = Focus::Editor;
+        app.editor.insert_text("foo\nbar foo");
+        app.editor.set_cursor(0, 0);
+
+        app.open_find_dialog();
+        for character in "foo".chars() {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        assert_eq!(app.find.matches.len(), 2);
+        assert_eq!(app.find.current, Some(0));
+        assert_eq!(app.editor.cursor_row(), 0);
+        assert_eq!(app.editor.cursor_col(), 0);
+        assert_eq!(app.find_ranges_for_line(0)[0].start, 0);
+        assert_eq!(app.find_ranges_for_line(0)[0].end, 3);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn find_next_and_previous_wrap_through_matches() {
+        let root = temp_project("find-next-previous");
+        let mut app = App::new_for_tests(root.clone());
+        app.dialog = None;
+        app.focus = Focus::Editor;
+        app.editor.insert_text("foo\nbar foo\nfoo");
+        app.editor.set_cursor(0, 0);
+        app.find.query = "foo".to_string();
+        app.refresh_find_matches_from_cursor();
+        app.jump_to_current_find_match();
+
+        app.find_next();
+        assert_eq!((app.editor.cursor_row(), app.editor.cursor_col()), (1, 4));
+
+        app.find_next();
+        assert_eq!((app.editor.cursor_row(), app.editor.cursor_col()), (2, 0));
+
+        app.find_next();
+        assert_eq!((app.editor.cursor_row(), app.editor.cursor_col()), (0, 0));
+
+        app.find_previous();
+        assert_eq!((app.editor.cursor_row(), app.editor.cursor_col()), (2, 0));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn find_supports_multiline_matches() {
+        let root = temp_project("find-multiline");
+        let mut app = App::new_for_tests(root.clone());
+        app.dialog = None;
+        app.focus = Focus::Editor;
+        app.editor.insert_text("alpha\nbeta\ngamma");
+        app.editor.set_cursor(0, 0);
+        app.find.query = "ha\nbe".to_string();
+        app.refresh_find_matches_from_cursor();
+
+        assert_eq!(
+            app.find.matches,
+            vec![SearchMatch {
+                start: Position { row: 0, col: 3 },
+                end: Position { row: 1, col: 2 },
+            }]
+        );
+        assert_eq!(
+            app.find_ranges_for_line(0),
+            vec![SearchRange {
+                start: 3,
+                end: 5,
+                current: true,
+            }]
+        );
+        assert_eq!(
+            app.find_ranges_for_line(1),
+            vec![SearchRange {
+                start: 0,
+                end: 2,
+                current: true,
+            }]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn find_dialog_accepts_multiline_paste() {
+        let root = temp_project("find-multiline-paste");
+        let mut app = App::new_for_tests(root.clone());
+        app.dialog = None;
+        app.focus = Focus::Editor;
+        app.editor.insert_text("alpha\nbeta\ngamma");
+        app.editor.set_cursor(0, 0);
+
+        app.open_find_dialog();
+        app.handle_paste("ha\nbe");
+
+        assert_eq!(app.find.query, "ha\nbe");
+        assert_eq!(app.find.matches.len(), 1);
+        assert_eq!((app.editor.cursor_row(), app.editor.cursor_col()), (0, 3));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn find_escape_clears_search_state() {
+        let root = temp_project("find-clears");
+        let mut app = App::new_for_tests(root.clone());
+        app.dialog = None;
+        app.focus = Focus::Editor;
+        app.editor.insert_text("foo");
+        app.editor.set_cursor(0, 0);
+
+        app.open_find_dialog();
+        for character in "foo".chars() {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        assert!(app.find_active());
+
+        app.handle_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(app.dialog, None);
+        assert!(!app.find_active());
+        assert!(app.find.matches.is_empty());
+        assert_eq!(app.status, "Find cleared");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn find_reports_no_matches() {
+        let root = temp_project("find-no-matches");
+        let mut app = App::new_for_tests(root.clone());
+        app.dialog = None;
+        app.focus = Focus::Editor;
+        app.editor.insert_text("alpha beta");
+        app.editor.set_cursor(0, 0);
+
+        app.open_find_dialog();
+        for character in "zzz".chars() {
+            app.handle_dialog_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        assert!(app.find.matches.is_empty());
+        assert_eq!(app.find.current, None);
+        assert_eq!(app.status, "Find: no matches for zzz");
 
         let _ = fs::remove_dir_all(root);
     }
